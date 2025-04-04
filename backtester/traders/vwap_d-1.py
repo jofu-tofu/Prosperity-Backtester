@@ -16,7 +16,6 @@ class Trader:
         else:
             traderData = {}
         result = {}
-        kelp_orders = []
         for product in self.products:
             order_depth: OrderDepth = state.order_depths[product]
             print(product + ' SELL ORDERS: ' + str(order_depth.sell_orders))
@@ -38,8 +37,8 @@ class Trader:
                 orders.append(Order(product, rounded_vwap-int(2*current_pos/abs(current_pos)), -current_pos))
             max_buy = -current_pos + self.MAX_KELP_POSITION
             max_sell = -current_pos - self.MAX_KELP_POSITION
-            orders.append(Order(product, rounded_vwap, int(max_buy//3)))
-            orders.append(Order(product, rounded_vwap+1, int(max_sell//3))) # Buy at VWAP-1 if possible
+            orders.append(Order(product, rounded_vwap-2, int(max_buy//3)))
+            orders.append(Order(product, rounded_vwap-1, int(max_sell//3))) # Buy at VWAP-1 if possible
             result[product] = orders
         conversions = 1
         traderData = jsonpickle.encode(traderData)
