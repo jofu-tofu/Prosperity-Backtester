@@ -69,10 +69,10 @@ class Trader:
 
                 if max_sell != 0:
                     sell_threshold = list(order_depth.sell_orders.items())[-1][0]
-                    orders.append(Order(product, sell_threshold - 1, max_sell))
+                    orders.append(Order(product, sell_threshold-1, max_sell))
                 if max_buy != 0:
                     buy_threshold = list(order_depth.buy_orders.items())[-1][0]
-                    orders.append(Order(product, buy_threshold + 1, max_buy))
+                    orders.append(Order(product, buy_threshold+1, max_buy))
                 print("ORDERS: ", orders)
                 result[product] = orders
 
