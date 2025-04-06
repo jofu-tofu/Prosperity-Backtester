@@ -261,3 +261,124 @@ def generate_permuted_order_book_cache_independent(
          print("Warning: No books were generated despite having input timestamps. Check data validity and logic.")
 
     return dict(permuted_book_cache)
+# permutation_utils.py
+# ... (other functions remain the same) ...
+
+# --- Calculate Relative Inferred Books ---
+def calculate_relative_inferred_books(
+    product_inferred_book_cache: Dict[int, OrderDepth], # {orig_ts: OrderDepth} for ONE product
+    product_vwap_series: pd.Series # VWAP series for that product
+    ) -> Dict[int, Dict[str, Dict[int, int]]]:
+    """
+    Calculates relative order books (offsets from VWAP) for a SINGLE product's
+    INFERRED liquidity cache.
+
+    Args:
+        product_inferred_book_cache: Dict mapping original timestamp to the inferred OrderDepth for the target product.
+        product_vwap_series: Series containing the VWAP for the target product, indexed by timestamp.
+
+    Returns:
+        Dictionary {timestamp: {'buys': {offset: vol}, 'sells': {offset: vol}}}
+        'buys': Offsets where inferred bots were buying (filling our sells)
+        'sells': Offsets where inferred bots were selling (filling our buys)
+    """
+    print(f"Calculating relative INFERRED books for product...")
+    relative_books = defaultdict(dict)
+
+    # Align timestamps between inferred books and VWAP
+    common_timestamps = sorted(list(set(product_inferred_book_cache.keys()) & set(product_vwap_series.index)))
+
+    for timestamp in common_timestamps:
+        inferred_depth = product_inferred_book_cache.get(timestamp)
+        vwap = product_vwap_series.get(timestamp)
+
+        if inferred_depth is None or pd.isna(vwap):
+            continue
+
+        rounded_vwap = round(vwap)
+        rel_buys: Dict[int, int] = {}
+        rel_sells: Dict[int, int] = {}
+
+        # Inferred bot BUY orders (filling our sells)
+        if inferred_depth.buy_orders:
+            for price, vol in inferred_depth.buy_orders.items():
+                if vol > 0: # Should always be positive in inferred cache representation
+                    try:
+                        offset = int(price) - rounded_vwap
+                        rel_buys[offset] = rel_buys.get(offset, 0) + int(vol)
+                    except (ValueError, TypeError): pass
+
+        # Inferred bot SELL orders (filling our buys) - stored as negative internally
+        if inferred_depth.sell_orders:
+            for price, vol in inferred_depth.sell_orders.items():
+                 if vol < 0: # Should always be negative in inferred cache representation
+                    try:
+                        offset = int(price) - rounded_vwap
+                        # Store positive volume in relative structure
+                        rel_sells[offset] = rel_sells.get(offset, 0) + abs(int(vol))
+                    except (ValueError, TypeError): pass
+
+        if rel_buys or rel_sells:
+            relative_books[timestamp] = {'buys': rel_buys, 'sells': rel_sells}
+
+    print(f"Calculated relative INFERRED books for {len(relative_books)} timestamps for this product.")
+    return dict(relative_books)
+
+
+# --- Generate Permuted INFERRED Books (Independent Products) ---
+# This function is almost identical to the explicit one, just operates on different relative books
+def generate_permuted_inferred_book_cache_independent(
+    products: list,
+    all_timestamps: np.ndarray,
+    all_permuted_vwaps: Dict[str, pd.Series],
+    all_original_indices_maps: Dict[str, pd.Series],
+    all_relative_inferred_books: Dict[str, Dict[int, Dict[str, Dict[int, int]]]] # Takes INFERRED relative books
+    ) -> Dict[int, Dict[str, OrderDepth]]:
+    """
+    Generates a permuted INFERRED order book cache where each product's structure
+    application is handled independently based on permuted VWAP.
+    """
+    print(f"Generating permuted INFERRED books independently for {len(products)} products across {len(all_timestamps)} timestamps (MAX_OFFSET={MAX_REASONABLE_OFFSET})")
+    permuted_book_cache: Dict[int, Dict[str, OrderDepth]] = defaultdict(lambda: defaultdict(OrderDepth))
+
+    for ts_perm in all_timestamps:
+        for product in products:
+            # Get this product's specific data
+            product_vwap_series = all_permuted_vwaps.get(product)
+            product_orig_map = all_original_indices_maps.get(product)
+            product_rel_books = all_relative_inferred_books.get(product) # Use INFERRED relative books
+
+            if product_vwap_series is None or product_orig_map is None or product_rel_books is None: continue
+
+            permuted_vwap = product_vwap_series.get(ts_perm)
+            original_ts_to_use = product_orig_map.get(ts_perm)
+            if pd.isna(permuted_vwap) or original_ts_to_use is None: continue
+
+            original_relative_ts_book = product_rel_books.get(original_ts_to_use)
+            if not original_relative_ts_book: continue
+
+            rounded_permuted_vwap = round(permuted_vwap)
+            new_depth = OrderDepth()
+
+            # Apply relative inferred bot BUY structure
+            for offset, vol in original_relative_ts_book.get('buys', {}).items():
+                if abs(offset) <= MAX_REASONABLE_OFFSET:
+                    try:
+                         price = int(rounded_permuted_vwap + offset)
+                         new_depth.buy_orders[price] = new_depth.buy_orders.get(price, 0) + vol
+                    except (ValueError, TypeError): pass
+
+            # Apply relative inferred bot SELL structure (stored pos vol, output needs neg vol)
+            for offset, vol in original_relative_ts_book.get('sells', {}).items():
+                 if abs(offset) <= MAX_REASONABLE_OFFSET:
+                    try:
+                         price = int(rounded_permuted_vwap + offset)
+                         new_depth.sell_orders[price] = new_depth.sell_orders.get(price, 0) - vol # Output negative
+                    except (ValueError, TypeError): pass
+
+            if new_depth.buy_orders or new_depth.sell_orders:
+                permuted_book_cache[ts_perm][product] = new_depth
+
+    num_generated_ts = len(permuted_book_cache)
+    print(f"Generated permuted INFERRED order book cache for {num_generated_ts} timestamps.")
+    return dict(permuted_book_cache)

@@ -407,13 +407,17 @@ class Backtester:
         print(f"Explicit order depths precomputed for {len(self.explicit_order_depths_cache)} timestamps.")
 
 
-    def run(self, order_depth_override_cache: Optional[Dict[int, Dict[Symbol, OrderDepth]]] = None, disable_inferred_book: bool = False):
-        run_mode = "OVERRIDE" if order_depth_override_cache is not None else "NORMAL"
+    def run(
+        self,
+        explicit_book_override: Optional[Dict[int, Dict[Symbol, OrderDepth]]] = None,
+        inferred_book_override: Optional[Dict[int, Dict[Symbol, OrderDepth]]] = None
+        ):
+        # Determine run mode based on explicit override presence
+        run_mode = "OVERRIDE_EXPLICIT" if explicit_book_override is not None else "NORMAL"
+        # Note: inferred_book_override might be present even in NORMAL mode if passed from app.py permutation
         print(f"\n--- ENTERING Backtester.run (Mode: {run_mode}) ---")
-        print(f"Passed order_depth_override_cache is None? {order_depth_override_cache is None}")
-        print(f"Disable inferred book: {disable_inferred_book}")
-        if order_depth_override_cache is not None:
-            print(f"Passed override cache has {len(order_depth_override_cache)} timestamps.")
+        print(f"Explicit Override Provided: {explicit_book_override is not None}")
+        print(f"Inferred Override Provided: {inferred_book_override is not None}")
 
 
         traderData = "" # Initialize traderData for the run
@@ -479,24 +483,32 @@ class Backtester:
         active_inferred_cache: Dict[int, Dict[Symbol, OrderDepth]]
         active_fv_book_cache: Dict[int, Dict[Symbol, OrderDepth]] # Book used for Fair Value / PnL
 
-        if run_mode == "OVERRIDE":
-            if order_depth_override_cache is None:
-                 print("ERROR: Override mode selected but override cache is None! Falling back to explicit.")
-                 active_explicit_book_cache = self.explicit_order_depths_cache
+        if run_mode == "OVERRIDE_EXPLICIT":
+            active_explicit_book_cache = explicit_book_override
+            # In override mode, inferred matching is typically disabled
+            # UNLESS an inferred override is *also* explicitly provided
+            if inferred_book_override is not None:
+                 active_inferred_cache = inferred_book_override
+                 use_inferred_book = True # Use the provided inferred override
+                 print("RUN MODE: OVERRIDE_EXPLICIT (with Inferred Override) - Using overrides for both. Matching inferred.")
             else:
-                 active_explicit_book_cache = order_depth_override_cache
-            use_inferred_book = False # Never use inferred book in override mode
-            active_inferred_cache = {}
-            active_fv_book_cache = active_explicit_book_cache # PnL uses the override book in this mode
-            print("RUN MODE: OVERRIDE - Using override cache for state, matching, and PnL. Inferred book disabled.")
+                 active_inferred_cache = {} # No inferred override, no matching
+                 use_inferred_book = False
+                 print("RUN MODE: OVERRIDE_EXPLICIT (No Inferred Override) - Using explicit override. Inferred matching disabled.")
+            active_fv_book_cache = active_explicit_book_cache # PnL uses the explicit override book
         else: # NORMAL mode
             active_explicit_book_cache = self.explicit_order_depths_cache
-            use_inferred_book = not disable_inferred_book
-            active_inferred_cache = self.inferred_bot_liquidity_cache if use_inferred_book else {}
-            # PnL calculation should ideally use the *real* market state, which is the explicit book
+            # Check if an inferred override was passed (e.g., from permutation)
+            if inferred_book_override is not None:
+                 active_inferred_cache = inferred_book_override
+                 use_inferred_book = True # Use the provided override
+                 print("RUN MODE: NORMAL (with Inferred Override) - Using explicit cache. Using inferred override for matching.")
+            else: # Standard normal run, use the originally calculated inferred cache
+                 active_inferred_cache = self.inferred_bot_liquidity_cache
+                 use_inferred_book = True # Use the original inferred cache
+                 print("RUN MODE: NORMAL (Standard) - Using explicit cache. Using original inferred cache for matching.")
+            # PnL calculation always uses the explicit book in normal mode
             active_fv_book_cache = self.explicit_order_depths_cache
-            print(f"RUN MODE: NORMAL - Using explicit cache for state & PnL. Using inferred book for matching: {use_inferred_book}")
-
         # Determine timestamps to iterate over based on the *explicit* book (original or override)
         # This defines the "ticks" of the simulation
         timestamps_to_iterate = sorted([
@@ -600,10 +612,9 @@ class Backtester:
 
             # --- Process Orders and Match ---
             executed_own_trades_this_step = defaultdict(list)
-            # Use copies for matching to allow modification without affecting next timestamp's state input
             explicit_depths_for_matching = copy.deepcopy(active_explicit_book_cache.get(timestamp, {}))
-            bot_liquidity_books_at_t = copy.deepcopy(active_inferred_cache.get(timestamp, {})) if use_inferred_book else {}
-
+            # Use the determined active_inferred_cache for matching
+            inferred_depths_for_matching = copy.deepcopy(active_inferred_cache.get(timestamp, {})) if use_inferred_book else {}
             if trader_orders_dict:
                 all_submitted_orders: List[Order] = []
                 # Validate and flatten orders
@@ -656,34 +667,24 @@ class Backtester:
                     # product_orders.sort(key=lambda o: o.price, reverse=(o.quantity < 0)) # Example sort
 
                     for order in product_orders:
-                        order_copy = copy.deepcopy(order) # Match against a copy, leave original untouched
-                        qty_before_match = order_copy.quantity
+                          order_copy = copy.deepcopy(order)
 
-                        # 1. Match Explicit Book (Original or Override)
-                        trades_explicit, sandbox_log_output = self._match_against_book(
-                            timestamp, order_copy, explicit_depths_for_matching, sandbox_log_output,
-                            "ExplicitBook", "any" # Always match explicit if price allows
-                        )
-                        executed_own_trades_this_step[product].extend(trades_explicit)
+                          # 1. Match Explicit Book (Original or Override)
+                          trades_explicit, sandbox_log_output = self._match_against_book(
+                              timestamp, order_copy, explicit_depths_for_matching, sandbox_log_output,
+                              "ExplicitBook", "any"
+                          )
+                          executed_own_trades_this_step[product].extend(trades_explicit)
 
-                        # 2. Match Inferred Bot Liquidity (if enabled and order not fully filled)
-                        if use_inferred_book and abs(order_copy.quantity) > 0 and product in bot_liquidity_books_at_t:
-                             # Pass only the specific product's inferred book for matching
-                             current_prod_inferred = {product: bot_liquidity_books_at_t[product]}
-                             trades_bot, sandbox_log_output = self._match_against_book(
-                                 timestamp, order_copy, current_prod_inferred, sandbox_log_output,
-                                 "InferredBot", self.bot_behavior # Use configured bot matching rule
-                             )
-                             executed_own_trades_this_step[product].extend(trades_bot)
-
-                        # Log unfilled quantity (optional)
-                        if abs(order_copy.quantity) > 0 and abs(order_copy.quantity) < abs(qty_before_match):
-                             # Partial fill occurred
-                             pass # Log if desired
-                        elif abs(order_copy.quantity) == abs(qty_before_match) and (trades_explicit or (use_inferred_book and product in bot_liquidity_books_at_t)):
-                             # No fill occurred despite matching attempts
-                             # sandbox_log_output += f"\nNote: Order {order} for {product} found no matching liquidity."
-                             pass
+                          # 2. Match Inferred Book (Original or Override, if enabled)
+                          if use_inferred_book and abs(order_copy.quantity) > 0 and product in inferred_depths_for_matching:
+                               # Pass only the specific product's inferred book for matching
+                               current_prod_inferred = {product: inferred_depths_for_matching[product]}
+                               trades_bot, sandbox_log_output = self._match_against_book(
+                                   timestamp, order_copy, current_prod_inferred, sandbox_log_output,
+                                   "InferredBot", self.bot_behavior # Use configured bot matching rule
+                               )
+                               executed_own_trades_this_step[product].extend(trades_bot)
 
 
             # --- Log Results for the Step ---
