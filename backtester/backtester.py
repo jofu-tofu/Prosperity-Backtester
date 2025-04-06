@@ -214,22 +214,65 @@ class Backtester:
         # Create listings based on the final product list
         self.listings = {prod: Listing(prod, prod, "SEASHELLS") for prod in self.products}
 
-        # Build final inferred bot liquidity cache from aggregated maxes
-        print("Building final inferred bot liquidity cache...")
+         # --- REVISED AGAIN: Build MARGINAL inferred bot liquidity cache ---
+        print("Building MARGINAL inferred bot liquidity cache...")
+        self.inferred_bot_liquidity_cache = defaultdict(lambda: defaultdict(OrderDepth))
         timestamps_with_inferred = set(agg_max_bot_buys.keys()).union(agg_max_bot_sells.keys())
-        for ts in timestamps_with_inferred:
+
+        for ts in sorted(list(timestamps_with_inferred)): # Process timestamps in order
+            prod_max_buy_vol_at_price = agg_max_bot_buys.get(ts, {}) # {prod: {price: max_vol}}
+            prod_max_sell_vol_at_price = agg_max_bot_sells.get(ts, {}) # {prod: {price: max_vol}}
+
             for prod in self.products:
-                 has_buys = prod in agg_max_bot_buys.get(ts, {}) and agg_max_bot_buys[ts][prod]
-                 has_sells = prod in agg_max_bot_sells.get(ts, {}) and agg_max_bot_sells[ts][prod]
-                 if has_buys or has_sells:
-                      bot_depth = OrderDepth()
-                      if has_buys:
-                          bot_depth.buy_orders = dict(agg_max_bot_buys[ts][prod])
-                      if has_sells:
-                          # Store inferred bot sells as negative volume
-                          bot_depth.sell_orders = {p: -v for p, v in agg_max_bot_sells[ts][prod].items()}
-                      self.inferred_bot_liquidity_cache[ts][prod] = bot_depth
-        print(f"Final inferred bot liquidity cache created for {len(self.inferred_bot_liquidity_cache)} timestamps.")
+                max_buy_vol = prod_max_buy_vol_at_price.get(prod, {})
+                max_sell_vol = prod_max_sell_vol_at_price.get(prod, {})
+
+                if not max_buy_vol and not max_sell_vol:
+                    continue # Skip if no inferred liquidity for this product/ts
+
+                marginal_depth = OrderDepth()
+
+                # Process BUY liquidity (Bots buying = Our Sell Fills)
+                # Convert max vol at price P (meaning they buy X @ P or better)
+                # to marginal vol *only* at price P.
+                if max_buy_vol:
+                    sorted_buy_prices = sorted(max_buy_vol.keys(), reverse=True) # Best price first (highest)
+                    accounted_for_volume = 0
+                    for i, price in enumerate(sorted_buy_prices):
+                        total_volume_at_or_better = max_buy_vol[price]
+                        # Marginal volume at this specific price level
+                        marginal_volume = max(0, total_volume_at_or_better - accounted_for_volume)
+                        if marginal_volume > 0:
+                            marginal_depth.buy_orders[price] = marginal_volume
+                        accounted_for_volume = total_volume_at_or_better # Update volume accounted for by better prices
+
+                # Process SELL liquidity (Bots selling = Our Buy Fills)
+                # Convert max vol at price P (meaning they sell X @ P or better)
+                # to marginal vol *only* at price P.
+                if max_sell_vol:
+                    sorted_sell_prices = sorted(max_sell_vol.keys()) # Best price first (lowest)
+                    accounted_for_volume = 0
+                    for i, price in enumerate(sorted_sell_prices):
+                        total_volume_at_or_better = max_sell_vol[price]
+                        # Marginal volume at this specific price level
+                        marginal_volume = max(0, total_volume_at_or_better - accounted_for_volume)
+                        if marginal_volume > 0:
+                             # Store sell orders with NEGATIVE volume
+                            marginal_depth.sell_orders[price] = -marginal_volume
+                        accounted_for_volume = total_volume_at_or_better # Update volume accounted for
+
+                # Assign the calculated marginal depth
+                if marginal_depth.buy_orders or marginal_depth.sell_orders:
+                    self.inferred_bot_liquidity_cache[ts][prod] = marginal_depth
+                # else: # Debug if needed
+                #     if max_buy_vol or max_sell_vol:
+                #         print(f"WARN Cache Build: No marginal volume derived for {prod}@{ts} despite inferred data.")
+                #         print(f"  Max Buy Vols: {max_buy_vol}")
+                #         print(f"  Max Sell Vols: {max_sell_vol}")
+
+
+        print(f"Final MARGINAL inferred bot liquidity cache created for {len(self.inferred_bot_liquidity_cache)} timestamps.")
+        # --- END REVISED CACHE BUILDING ---
 
 
     def _calculate_excess_volume_per_log(self, submission_trades_df: pd.DataFrame, explicit_book_cache: Dict[int, Dict[Symbol, OrderDepth]]):

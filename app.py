@@ -588,49 +588,159 @@ def display_fill_dist_chart(market_df: pd.DataFrame, trades_df: pd.DataFrame, ti
         st.error(f"Fill Dist Chart Error ({title_prefix}): {e}")
         traceback.print_exc()
 
+
+# In app.py
+
 def display_inferred_liquidity_chart(market_df: pd.DataFrame, inferred_cache: Dict[int, Dict[str, Any]], title_prefix: str):
-    """Displays inferred liquidity volume and relative price."""
-    st.markdown("##### Inferred Liquidity Book (Relative to Explicit Mid-Price)")
+    """Displays inferred liquidity volume and relative price vs VWAP."""
+    st.markdown("##### Inferred Liquidity Book (Relative to VWAP) Based on Logs Given") # Title updated
     print(f"\n--- DEBUG Inferred Chart START ({title_prefix}) ---")
 
-    if market_df.empty: st.info(f"Inferred Chart: No market data ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): market_df empty ---"); return
-    if not inferred_cache: st.info(f"Inferred Chart: Cache empty ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): inferred_cache empty ---"); return
+    if market_df.empty:
+        st.info(f"Inferred Chart: No Activity Log data (needed for VWAP) ({title_prefix}).")
+        print(f"--- END Inferred ({title_prefix}): market_df empty ---")
+        return
+    if not inferred_cache:
+        st.info(f"Inferred Chart: Inferred liquidity cache is empty ({title_prefix}).")
+        print(f"--- END Inferred ({title_prefix}): inferred_cache empty ---")
+        return
 
+    # --- Prepare Data & Ensure/Calculate VWAP ---
     market_data_processed = market_df.copy()
     if market_data_processed.index.name == 'timestamp': market_data_processed.reset_index(inplace=True)
     elif 'timestamp' not in market_data_processed.columns: st.warning(f"Inferred Chart: Ts missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Ts ---"); return
     market_data_processed['timestamp'] = pd.to_numeric(market_data_processed['timestamp'], errors='coerce'); market_data_processed.dropna(subset=['timestamp'], inplace=True)
     if 'product' not in market_data_processed.columns: st.warning(f"Inferred Chart: Product missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Prod ---"); return
     market_data_processed['product'] = market_data_processed['product'].astype(str)
-    if 'mid_price' not in market_data_processed.columns: st.warning(f"Inferred Chart: Mid-price missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Mid ---"); return
-    market_data_processed['mid_price'] = pd.to_numeric(market_data_processed['mid_price'], errors='coerce')
 
-    processed_data = []; skipped_timestamps = 0; processed_timestamps = 0
+    vwap_available = False
+    # Check for existing VWAP first
+    if 'vwap' in market_data_processed.columns and pd.api.types.is_numeric_dtype(market_data_processed['vwap']) and not market_data_processed['vwap'].isna().all():
+        print(f"  Using existing VWAP for Inferred Chart.")
+        vwap_available = True
+    else:
+        print(f"  Attempting VWAP recalculation for Inferred Chart...")
+        try: # Calculate VWAP on the whole market df
+            price_vol_cols=[f'{s}_{t}_{l}' for s in ['bid','ask'] for t in ['price','volume'] for l in [1,2,3]]
+            for col in price_vol_cols:
+                 if col in market_data_processed.columns:
+                      if not pd.api.types.is_numeric_dtype(market_data_processed[col]):
+                          market_data_processed[col] = pd.to_numeric(market_data_processed[col], errors='coerce')
+            market_data_processed['vwap'] = market_data_processed.apply(calculate_row_vwap, axis=1)
+            if 'product' in market_data_processed.columns:
+                market_data_processed['vwap'] = market_data_processed.groupby('product')['vwap'].ffill().bfill()
+            if 'vwap' in market_data_processed.columns and not market_data_processed['vwap'].isna().all():
+                vwap_available = True
+                print(f"  VWAP recalculation successful for Inferred Chart.")
+            else:
+                print(f"  VWAP recalculation failed or all NaN for Inferred Chart.")
+        except Exception as e:
+            print(f"Error calculating VWAP for Inferred Chart ({title_prefix}): {e}")
+
+    if not vwap_available:
+        st.warning(f"Inferred Chart: VWAP unavailable ({title_prefix}). Cannot calculate relative prices.")
+        print(f"--- END Inferred ({title_prefix}): VWAP unavailable ---")
+        return
+    # --- End VWAP Prep ---
+
+
+    processed_data = []
+    skipped_timestamps = 0
+    processed_timestamps = 0
+
+    # Iterate through timestamps present in the inferred cache
     for timestamp, product_depths in inferred_cache.items():
         processed_timestamps += 1
-        mid_prices_at_ts = market_data_processed[market_data_processed['timestamp'] == timestamp].set_index('product')['mid_price']
-        if mid_prices_at_ts.empty: skipped_timestamps +=1; continue
+        # Get corresponding VWAPs from market_df for this timestamp
+        vwaps_at_ts = market_data_processed[market_data_processed['timestamp'] == timestamp].set_index('product')['vwap']
+        if vwaps_at_ts.empty:
+            skipped_timestamps +=1
+            continue # Skip timestamp if no VWAP data found
 
         for product, inferred_depth in product_depths.items():
-            mid_price = mid_prices_at_ts.get(product)
-            if pd.isna(mid_price): continue
+            vwap_price = vwaps_at_ts.get(product) # Get VWAP for this product
+            if pd.isna(vwap_price):
+                continue # Skip product if VWAP is NaN
+
+            # Process Inferred Buys (Bots buying from us)
             if inferred_depth.buy_orders:
                 for price, volume in inferred_depth.buy_orders.items():
-                    if volume > 0: processed_data.append({'timestamp': timestamp, 'product': product, 'relative_price': price - mid_price, 'volume': volume, 'type': 'Inferred Buy (Bot Buy / Our Sell Fill)', 'original_price': price})
+                    if volume > 0:
+                        relative_price = price - vwap_price # Calculate relative to VWAP
+                        processed_data.append({
+                            'timestamp': timestamp,
+                            'product': product,
+                            'relative_price': relative_price,
+                            'volume': volume,
+                            'type': 'Inferred Buy (vs VWAP)', # Updated label
+                            'original_price': price
+                        })
+
+            # Process Inferred Sells (Bots selling to us)
             if inferred_depth.sell_orders:
                 for price, volume in inferred_depth.sell_orders.items():
-                     if volume < 0: actual_volume = abs(volume); processed_data.append({'timestamp': timestamp, 'product': product, 'relative_price': price - mid_price, 'volume': actual_volume, 'type': 'Inferred Sell (Bot Sell / Our Buy Fill)', 'original_price': price})
+                     if volume < 0: # Inferred sells stored negative
+                        actual_volume = abs(volume)
+                        relative_price = price - vwap_price # Calculate relative to VWAP
+                        processed_data.append({
+                            'timestamp': timestamp,
+                            'product': product,
+                            'relative_price': relative_price,
+                            'volume': actual_volume,
+                            'type': 'Inferred Sell (vs VWAP)', # Updated label
+                            'original_price': price
+                        })
 
-    print(f"  Processed {processed_timestamps} timestamps from inferred cache. Skipped {skipped_timestamps} due to missing mid-price.")
-    if not processed_data: st.info(f"Inferred Chart: No processable inferred data ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Proc Data ---"); return
-    plot_df = pd.DataFrame(processed_data); print(f"  Final plot data shape: {plot_df.shape}")
+    print(f"  Processed {processed_timestamps} timestamps from inferred cache. Skipped {skipped_timestamps} due to missing VWAP.")
+
+    if not processed_data:
+        st.info(f"Inferred Chart: No processable inferred liquidity data found ({title_prefix}).")
+        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - No Data After Processing ---")
+        return
+
+    plot_df = pd.DataFrame(processed_data)
+    print(f"  Final plot data shape: {plot_df.shape}")
+
+    # --- Create Plot ---
     try:
-        color_map = {'Inferred Buy (Bot Buy / Our Sell Fill)': px.colors.qualitative.Plotly[2], 'Inferred Sell (Bot Sell / Our Buy Fill)': px.colors.qualitative.Plotly[3]}
-        fig = px.scatter(plot_df, x='timestamp', y='relative_price', size='volume', color='type', facet_col='product', color_discrete_map=color_map, title=f"{title_prefix} - Inferred Liquidity vs. Explicit Mid-Price", labels={'relative_price': 'Price Relative to Explicit Mid ($)', 'volume': 'Inferred Volume', 'type': 'Inferred Order Type', 'product': 'Product'}, hover_data={'timestamp': True, 'product': True, 'relative_price': ':.2f', 'volume': True, 'type': True, 'original_price': True})
-        fig.update_layout(height=400, margin=dict(l=20, r=20, t=50, b=20)); fig.update_yaxes(zeroline=True, zerolinewidth=2, zerolinecolor='Black')
-        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-        st.plotly_chart(fig, use_container_width=True); print(f"--- DEBUG Inferred Chart END ({title_prefix}) - Plotted ---")
-    except Exception as e: st.error(f"Inferred Chart Error ({title_prefix}): {e}"); print(f"--- END Inferred ({title_prefix}): Plot Error ---"); traceback.print_exc()
+        # Define colors
+        color_map = {
+            'Inferred Buy (vs VWAP)': px.colors.qualitative.Plotly[2], # Example: Green
+            'Inferred Sell (vs VWAP)': px.colors.qualitative.Plotly[3] # Example: Red
+        }
+
+        fig = px.scatter(plot_df,
+                         x='timestamp',
+                         y='relative_price',
+                         size='volume',
+                         color='type',
+                         facet_col='product',
+                         color_discrete_map=color_map,
+                         title=f"{title_prefix} - Inferred Liquidity vs. VWAP", # Updated Title
+                         labels={'relative_price': 'Price Relative to VWAP ($)', # Updated Label
+                                 'volume': 'Inferred Volume',
+                                 'type': 'Inferred Order Type',
+                                 'product': 'Product'},
+                         hover_data={'timestamp': True,
+                                     'product': True,
+                                     'relative_price': ':.2f',
+                                     'volume': True,
+                                     'type': True,
+                                     'original_price': True} # Show original price on hover
+                        )
+
+        fig.update_layout(height=400, margin=dict(l=20, r=20, t=50, b=20))
+        fig.update_yaxes(zeroline=True, zerolinewidth=2, zerolinecolor='Black') # Highlight VWAP line (y=0)
+        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1])) # Clean facet titles
+
+        st.plotly_chart(fig, use_container_width=True)
+        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - Plotted Successfully ---")
+
+    except Exception as e:
+        st.error(f"Error creating Inferred Liquidity chart ({title_prefix}): {e}")
+        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - Plotting Error ---")
+        traceback.print_exc()
+
 
 # --- Session State & Clear/Rerun Functions ---
 # (Initialize, Clear functions remain the same)
@@ -773,7 +883,7 @@ with st.sidebar:
         st.subheader("3. Settings")
         col_a, col_b = st.columns(2)
         with col_a:
-            bot_behavior = st.selectbox("Bot Matching:", ["none", "eq", "lt", "lte"], index=3, key="bot_behavior", help="Rule vs inferred bots.")
+            bot_behavior = st.selectbox("Bot Matching:", ["none", "lt", "lte"], index=2, key="bot_behavior", help="Rule vs inferred bots.")
         with col_b:
             ignore_limits_checkbox = st.checkbox("Ignore Limits", value=False, key="ignore_limits")
         min_time, max_time = 0, constants.MAX_TIMESTAMP

@@ -1,4 +1,4 @@
-from datamodel import OrderDepth, UserId, TradingState, Order
+from backtester.datamodel import OrderDepth, UserId, TradingState, Order
 from typing import List
 import string
 import numpy as np

@@ -263,69 +263,61 @@ def generate_permuted_order_book_cache_independent(
     return dict(permuted_book_cache)
 # permutation_utils.py
 # ... (other functions remain the same) ...
+# In permutation_utils.py
 
-# --- Calculate Relative Inferred Books ---
+# In permutation_utils.py
+
+# --- REVERTED to simple offset calculation ---
 def calculate_relative_inferred_books(
-    product_inferred_book_cache: Dict[int, OrderDepth], # {orig_ts: OrderDepth} for ONE product
-    product_vwap_series: pd.Series # VWAP series for that product
+    product_inferred_book_cache: Dict[int, OrderDepth], # Input is MARGINAL inferred book
+    product_vwap_series: pd.Series
     ) -> Dict[int, Dict[str, Dict[int, int]]]:
     """
-    Calculates relative order books (offsets from VWAP) for a SINGLE product's
-    INFERRED liquidity cache.
-
-    Args:
-        product_inferred_book_cache: Dict mapping original timestamp to the inferred OrderDepth for the target product.
-        product_vwap_series: Series containing the VWAP for the target product, indexed by timestamp.
-
-    Returns:
-        Dictionary {timestamp: {'buys': {offset: vol}, 'sells': {offset: vol}}}
-        'buys': Offsets where inferred bots were buying (filling our sells)
-        'sells': Offsets where inferred bots were selling (filling our buys)
+    Calculates relative offsets for a SINGLE product's MARGINAL inferred liquidity cache.
+    (Logic is now the same as for explicit books).
     """
-    print(f"Calculating relative INFERRED books for product...")
+    print(f"Calculating relative MARGINAL INFERRED books for product...")
     relative_books = defaultdict(dict)
-
-    # Align timestamps between inferred books and VWAP
     common_timestamps = sorted(list(set(product_inferred_book_cache.keys()) & set(product_vwap_series.index)))
 
     for timestamp in common_timestamps:
         inferred_depth = product_inferred_book_cache.get(timestamp)
         vwap = product_vwap_series.get(timestamp)
-
-        if inferred_depth is None or pd.isna(vwap):
-            continue
+        if inferred_depth is None or pd.isna(vwap): continue
 
         rounded_vwap = round(vwap)
         rel_buys: Dict[int, int] = {}
         rel_sells: Dict[int, int] = {}
+        ts_rel_structure = {}
 
-        # Inferred bot BUY orders (filling our sells)
+        # Calculate buy offsets directly from marginal book
         if inferred_depth.buy_orders:
-            for price, vol in inferred_depth.buy_orders.items():
-                if vol > 0: # Should always be positive in inferred cache representation
+            for price, marginal_volume in inferred_depth.buy_orders.items():
+                if marginal_volume > 0:
                     try:
                         offset = int(price) - rounded_vwap
-                        rel_buys[offset] = rel_buys.get(offset, 0) + int(vol)
+                        rel_buys[offset] = rel_buys.get(offset, 0) + int(marginal_volume)
                     except (ValueError, TypeError): pass
 
-        # Inferred bot SELL orders (filling our buys) - stored as negative internally
+        # Calculate sell offsets directly from marginal book
         if inferred_depth.sell_orders:
-            for price, vol in inferred_depth.sell_orders.items():
-                 if vol < 0: # Should always be negative in inferred cache representation
+            for price, marginal_volume in inferred_depth.sell_orders.items():
+                 if marginal_volume < 0: # Sells are negative
                     try:
                         offset = int(price) - rounded_vwap
                         # Store positive volume in relative structure
-                        rel_sells[offset] = rel_sells.get(offset, 0) + abs(int(vol))
+                        rel_sells[offset] = rel_sells.get(offset, 0) + abs(int(marginal_volume))
                     except (ValueError, TypeError): pass
 
-        if rel_buys or rel_sells:
-            relative_books[timestamp] = {'buys': rel_buys, 'sells': rel_sells}
+        if rel_buys: ts_rel_structure['buys'] = rel_buys
+        if rel_sells: ts_rel_structure['sells'] = rel_sells
+        if ts_rel_structure: relative_books[timestamp] = ts_rel_structure
 
-    print(f"Calculated relative INFERRED books for {len(relative_books)} timestamps for this product.")
+    print(f"Calculated relative MARGINAL INFERRED books for {len(relative_books)} timestamps.")
     return dict(relative_books)
+# --- END REVERTED function ---
 
 
-# --- Generate Permuted INFERRED Books (Independent Products) ---
 # This function is almost identical to the explicit one, just operates on different relative books
 def generate_permuted_inferred_book_cache_independent(
     products: list,
