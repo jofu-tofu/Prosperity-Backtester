@@ -16,7 +16,7 @@ except ImportError:
         OrderDepth = Any
 
 
-MAX_REASONABLE_OFFSET = 2 # Limit offset applied from relative books
+MAX_REASONABLE_OFFSET = 15 # Limit offset applied from relative books
 
 # --- Per-Product Relative Book Calculation ---
 def calculate_relative_product_books(

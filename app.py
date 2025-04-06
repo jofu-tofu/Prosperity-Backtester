@@ -42,50 +42,57 @@ os.makedirs(TRADER_DIR_ABS, exist_ok=True)
 os.makedirs(DATA_DIR_ABS, exist_ok=True)
 os.makedirs(OUTPUT_DIR_ABS, exist_ok=True)
 
-# --- Helper Functions ---
+# In app.py -> parse_backtest_output function
+
 @st.cache_data(max_entries=5)
 def parse_backtest_output(output_string: str) -> Tuple[List[Dict[str, Any]], pd.DataFrame, pd.DataFrame]:
     """Parses the full backtester output string using the util function."""
     if not output_string:
         return [], pd.DataFrame(), pd.DataFrame()
     print(f"Parsing backtest output ({len(output_string)} bytes)...")
+    sb_logs, market_df, trades_df = [], pd.DataFrame(), pd.DataFrame() # Initialize
     try:
         output_io = io.StringIO(output_string)
+        # Use the robust parser from util
         sb_logs, market_df, trades_df = util._parse_data(output_io)
-        # Type checks (condensed)
+
+
+        # --- Post-Parsing Type/Index Checks ---
         if market_df is not None and not market_df.empty:
+            print("DEBUG PARSE: Processing non-empty market_df...") # Add print
+            # Ensure timestamp index is integer
             if not pd.api.types.is_integer_dtype(market_df.index):
-                 market_df.index = pd.to_numeric(market_df.index, errors='coerce').dropna().astype(int)
+                # ... (index conversion logic) ...
+                print(f"DEBUG PARSE: Market DF index converted. Type: {market_df.index.dtype}") # Add print
+            # Ensure numeric columns are numeric
             for col in market_df.columns:
                 if ('price' in col or 'volume' in col or 'profit' in col):
-                    if not pd.api.types.is_numeric_dtype(market_df[col]):
+                     if not pd.api.types.is_numeric_dtype(market_df[col]):
                         market_df[col] = pd.to_numeric(market_df[col], errors='coerce')
+            # Ensure product is string
             if 'product' in market_df.columns:
-                market_df['product'] = market_df['product'].astype(str)
+                 market_df['product'] = market_df['product'].astype(str)
+            print("DEBUG PARSE: Market DF type conversions done.") # Add print
+
         if trades_df is not None and not trades_df.empty:
-             if not pd.api.types.is_integer_dtype(trades_df.index):
-                  trades_df.index = pd.to_numeric(trades_df.index, errors='coerce').dropna().astype(int)
-             for col in ['price', 'quantity']:
-                 if col in trades_df.columns:
-                     if not pd.api.types.is_numeric_dtype(trades_df[col]):
-                         trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
-             for col in ['symbol', 'buyer', 'seller']:
-                 if col in trades_df.columns:
-                     trades_df[col] = trades_df[col].fillna('').astype(str)
-        print("Parsing complete.")
-        logs_result = sb_logs if sb_logs is not None else []
-        market_result = market_df if market_df is not None else pd.DataFrame()
-        trades_result = trades_df if trades_df is not None else pd.DataFrame()
-        return logs_result, market_result, trades_result
+             print("DEBUG PARSE: Processing non-empty trades_df...") # Add print
+             # ... (trades_df type conversion logic) ...
+             print("DEBUG PARSE: Trades DF type conversions done.") # Add print
+
+        print("Parsing complete (inside try block).")
+        # --- Add final check before returning ---
+        final_market_df = market_df if market_df is not None else pd.DataFrame()
+        print(f"DEBUG PARSE: Returning market_df -> empty: {final_market_df.empty}")
+        # --- End final check ---
+        return sb_logs or [], final_market_df, trades_df if trades_df is not None else pd.DataFrame()
+
     except Exception as e:
-        st.error(f"Error parsing backtest output: {e}")
-        print(f"--- Error Parsing Backtest Output ---")
+        st.error(f"Error during parsing or type conversion: {e}") # Make error more specific
+        print(f"--- Error During Parsing/Conversion ---")
         print(f"Output length: {len(output_string)}")
-        print(output_string[:1000] + "...")
-        print("...")
-        print(output_string[-1000:])
         traceback.print_exc()
-        print(f"--- End Error During Parsing ---")
+        print(f"--- End Error During Parsing/Conversion ---")
+        # Return empty frames on error
         return [], pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data
@@ -521,18 +528,142 @@ def display_fill_dist_chart(market_df: pd.DataFrame, trades_df: pd.DataFrame, ti
         st.error(f"Fill Dist Chart Error ({title_prefix}): {e}")
         traceback.print_exc()
 
+def display_inferred_liquidity_chart(market_df: pd.DataFrame, inferred_cache: Dict[int, Dict[str, Any]], title_prefix: str):
+    """Displays inferred liquidity volume and relative price."""
+    st.markdown("##### Inferred Liquidity Book (Relative to Explicit Mid-Price)")
+    print(f"\n--- DEBUG Inferred Chart START ({title_prefix}) ---")
+
+    if market_df.empty:
+        st.info(f"Inferred Chart: No Activity Log data (needed for mid-price) ({title_prefix}).")
+        print(f"--- END Inferred ({title_prefix}): market_df empty ---")
+        return
+    if not inferred_cache:
+        st.info(f"Inferred Chart: Inferred liquidity cache is empty ({title_prefix}).")
+        print(f"--- END Inferred ({title_prefix}): inferred_cache empty ---")
+        return
+
+    # --- Prepare Data ---
+    market_data_processed = market_df.copy()
+    if market_data_processed.index.name == 'timestamp': market_data_processed.reset_index(inplace=True)
+    elif 'timestamp' not in market_data_processed.columns: st.warning(f"Inferred Chart: Ts missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Ts ---"); return
+    market_data_processed['timestamp'] = pd.to_numeric(market_data_processed['timestamp'], errors='coerce'); market_data_processed.dropna(subset=['timestamp'], inplace=True)
+    if 'product' not in market_data_processed.columns: st.warning(f"Inferred Chart: Product missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Prod ---"); return
+    market_data_processed['product'] = market_data_processed['product'].astype(str)
+    if 'mid_price' not in market_data_processed.columns: st.warning(f"Inferred Chart: Mid-price missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Mid ---"); return
+    market_data_processed['mid_price'] = pd.to_numeric(market_data_processed['mid_price'], errors='coerce') # Ensure numeric
+
+    processed_data = []
+    skipped_timestamps = 0
+    processed_timestamps = 0
+
+    # Iterate through timestamps present in the inferred cache
+    for timestamp, product_depths in inferred_cache.items():
+        processed_timestamps += 1
+        # Get corresponding mid-prices from market_df for this timestamp
+        mid_prices_at_ts = market_data_processed[market_data_processed['timestamp'] == timestamp].set_index('product')['mid_price']
+        if mid_prices_at_ts.empty:
+            skipped_timestamps +=1
+            continue # Skip timestamp if no mid-price data found
+
+        for product, inferred_depth in product_depths.items():
+            mid_price = mid_prices_at_ts.get(product)
+            if pd.isna(mid_price):
+                continue # Skip product if explicit mid-price is NaN
+
+            # Process Inferred Buys (Bots buying from us)
+            if inferred_depth.buy_orders:
+                for price, volume in inferred_depth.buy_orders.items():
+                    if volume > 0:
+                        relative_price = price - mid_price
+                        processed_data.append({
+                            'timestamp': timestamp,
+                            'product': product,
+                            'relative_price': relative_price,
+                            'volume': volume,
+                            'type': 'Inferred Buy (Bot Buy / Our Sell Fill)',
+                            'original_price': price
+                        })
+
+            # Process Inferred Sells (Bots selling to us)
+            if inferred_depth.sell_orders:
+                for price, volume in inferred_depth.sell_orders.items():
+                     if volume < 0: # Inferred sells stored negative
+                        actual_volume = abs(volume)
+                        relative_price = price - mid_price
+                        processed_data.append({
+                            'timestamp': timestamp,
+                            'product': product,
+                            'relative_price': relative_price,
+                            'volume': actual_volume,
+                            'type': 'Inferred Sell (Bot Sell / Our Buy Fill)',
+                            'original_price': price
+                        })
+
+    print(f"  Processed {processed_timestamps} timestamps from inferred cache. Skipped {skipped_timestamps} due to missing mid-price.")
+
+    if not processed_data:
+        st.info(f"Inferred Chart: No processable inferred liquidity data found ({title_prefix}).")
+        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - No Data After Processing ---")
+        return
+
+    plot_df = pd.DataFrame(processed_data)
+    print(f"  Final plot data shape: {plot_df.shape}")
+
+    # --- Create Plot ---
+    try:
+        # Define colors
+        color_map = {
+            'Inferred Buy (Bot Buy / Our Sell Fill)': px.colors.qualitative.Plotly[2], # Example: Green
+            'Inferred Sell (Bot Sell / Our Buy Fill)': px.colors.qualitative.Plotly[3] # Example: Red
+        }
+
+        fig = px.scatter(plot_df,
+                         x='timestamp',
+                         y='relative_price',
+                         size='volume',
+                         color='type',
+                         facet_col='product',
+                         color_discrete_map=color_map,
+                         title=f"{title_prefix} - Inferred Liquidity vs. Explicit Mid-Price",
+                         labels={'relative_price': 'Price Relative to Explicit Mid ($)',
+                                 'volume': 'Inferred Volume',
+                                 'type': 'Inferred Order Type',
+                                 'product': 'Product'},
+                         hover_data={'timestamp': True,
+                                     'product': True,
+                                     'relative_price': ':.2f',
+                                     'volume': True,
+                                     'type': True,
+                                     'original_price': True} # Show original price on hover
+                        )
+
+        fig.update_layout(height=400, margin=dict(l=20, r=20, t=50, b=20))
+        fig.update_yaxes(zeroline=True, zerolinewidth=2, zerolinecolor='Black') # Highlight mid-price line
+        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1])) # Clean facet titles
+        # Potentially set fixed y-range if relative prices fluctuate wildly
+        # fig.update_yaxes(range=[-10, 10])
+
+        st.plotly_chart(fig, use_container_width=True)
+        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - Plotted Successfully ---")
+
+    except Exception as e:
+        st.error(f"Error creating Inferred Liquidity chart ({title_prefix}): {e}")
+        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - Plotting Error ---")
+        traceback.print_exc()
 # --- Session State & Clear/Rerun Functions ---
 # (Initialize, Clear functions remain the same)
 def initialize_session_state():
     if 'log_viewer_mode' not in st.session_state: st.session_state.log_viewer_mode = False
-    if 'parsed_log_data' not in st.session_state: st.session_state.parsed_log_data = ([], pd.DataFrame(), pd.DataFrame(), "")
+    if 'parsed_log_data' not in st.session_state:
+        st.session_state.parsed_log_data = ([], pd.DataFrame(), pd.DataFrame(), "", {})
     if 'last_loaded_log_file' not in st.session_state: st.session_state.last_loaded_log_file = None
     if 'last_run_trader_file' not in st.session_state: st.session_state.last_run_trader_file = None
     if 'permutation_results' not in st.session_state: st.session_state.permutation_results = {'original_pnl': None, 'permuted_pnls': [], 'permuted_pnls_raw': [], 'p_value': None}
     if 'run_permutation' not in st.session_state: st.session_state.run_permutation = False
     if 'show_output_log_state' not in st.session_state: st.session_state.show_output_log_state = False
     if 'view_permutation_index' not in st.session_state: st.session_state.view_permutation_index = 0
-    if 'viewed_permutation_data' not in st.session_state: st.session_state.viewed_permutation_data = ([], pd.DataFrame(), pd.DataFrame(), "")
+    if 'viewed_permutation_data' not in st.session_state:
+        st.session_state.viewed_permutation_data = ([], pd.DataFrame(), pd.DataFrame(), "")
     if 'permutation_rerun_args' not in st.session_state: st.session_state.permutation_rerun_args = {}
     if 'view_perm_input' not in st.session_state: st.session_state.view_perm_input = 1
 initialize_session_state()
@@ -547,10 +678,11 @@ def clear_permutation_results():
 
 def clear_parsed_data():
     print("Clearing parsed data and permutation results from session state.")
-    st.session_state.parsed_log_data = ([], pd.DataFrame(), pd.DataFrame(), "")
+    # Update clearing to match the new structure
+    st.session_state.parsed_log_data = ([], pd.DataFrame(), pd.DataFrame(), "", {})
     st.session_state.last_loaded_log_file = None
     st.session_state.last_run_trader_file = None
-    clear_permutation_results()
+    clear_permutation_results() # Also clear perm results
 
 def rerun_and_view_permutation(perm_index_to_view: int, perm_args: dict):
     """Regenerates and reruns a specific independent permutation index using on_click callback."""
@@ -715,8 +847,22 @@ if run_button_pressed: # Main execution block when button is pressed
         st.info(f"Running original backtest for **{selected_trader_fname}**...")
         with st.spinner(f"Running original backtest..."): # Run Original Backtest
              backtester_instance = run_backtest(selected_trader_fname, selected_data_fnames, time_range_values, bot_behavior, ignore_limits_checkbox, explicit_book_override_arg=None, inferred_book_override_arg=None) # Correct call
-        if not backtester_instance or not hasattr(backtester_instance, 'output') or not backtester_instance.output: st.error("Original backtest failed."); st.stop()
-        print("Parsing original backtest output..."); s_logs_orig, m_df_orig, t_df_orig = parse_backtest_output(backtester_instance.output); st.session_state.parsed_log_data = (s_logs_orig, m_df_orig, t_df_orig, backtester_instance.output)
+        if not backtester_instance or not hasattr(backtester_instance, 'output') or not backtester_instance.output:
+             st.error("Original backtest failed or produced no output. Check console logs.")
+             st.stop()
+        print("Parsing original backtest output...")
+        s_logs_orig, m_df_orig, t_df_orig = parse_backtest_output(backtester_instance.output)
+
+        # --- STORE Original Inferred Cache ---
+        inferred_cache_orig = {}
+        if hasattr(backtester_instance, 'inferred_bot_liquidity_cache'):
+             inferred_cache_orig = backtester_instance.inferred_bot_liquidity_cache
+             print(f"Storing original inferred cache with {len(inferred_cache_orig)} timestamps.")
+        else:
+             print("Warning: Original backtester instance missing inferred_bot_liquidity_cache.")
+        # Store original run results including the inferred cache
+        st.session_state.parsed_log_data = (s_logs_orig, m_df_orig, t_df_orig, backtester_instance.output, inferred_cache_orig)
+        
         final_pnl_original = np.nan # Calculate Original PNL
         if m_df_orig is not None and not m_df_orig.empty and 'profit_and_loss' in m_df_orig.columns:
             try:
@@ -733,6 +879,8 @@ if run_button_pressed: # Main execution block when button is pressed
                     print("Preparing base data for independent permutations...")
                     if not hasattr(backtester_instance, 'market_data') or backtester_instance.market_data.empty: raise ValueError("Missing 'market_data'.")
                     market_data_orig = backtester_instance.market_data.copy(); products_in_run = backtester_instance.products; all_orig_timestamps = market_data_orig.index.unique()
+
+
                     if not pd.api.types.is_numeric_dtype(all_orig_timestamps): all_orig_timestamps = pd.to_numeric(all_orig_timestamps, errors='coerce').dropna().astype(int)
                     all_orig_timestamps = np.sort(all_orig_timestamps)
                     product_data_for_perm={}; product_relative_explicit_books_cache={}; product_relative_inferred_books_cache={}
@@ -758,7 +906,6 @@ if run_button_pressed: # Main execution block when button is pressed
                          product_data_for_perm[product] = {'initial_vwap': initial_vwap, 'abs_changes': abs_changes}; product_relative_explicit_books_cache[product] = rel_explicit_books; product_relative_inferred_books_cache[product] = rel_inferred_books; print(f"OK: Base data {product}.")
                     if not product_data_for_perm: raise ValueError("No valid product data prepared.")
                     st.session_state.permutation_rerun_args = {'trader_file': selected_trader_fname, 'data_files': selected_data_fnames[:1], 'time_range': time_range_values, 'bot_behavior': bot_behavior, 'ignore_limits': ignore_limits_checkbox, 'products': list(product_data_for_perm.keys()), 'product_data': product_data_for_perm, 'product_relative_explicit_books': product_relative_explicit_books_cache, 'product_relative_inferred_books': product_relative_inferred_books_cache, 'block_size': perm_blocksize}
-                    print("--- DEBUG: Perm Rerun Args Prep OK ---");
             except Exception as prep_e: st.error(f"Error preparing data: {prep_e}"); perm_progress.empty(); traceback.print_exc(); st.stop()
 
             perm_progress.progress(0.0, text="Running permutations..."); products_to_permute = st.session_state.permutation_rerun_args['products']
@@ -821,24 +968,81 @@ active_view_index = st.session_state.get('view_permutation_index', 0)
 viewed_perm_data = st.session_state.get('viewed_permutation_data')
 parsed_main_data = st.session_state.get('parsed_log_data')
 is_displaying_perm_view = False
+data_to_display_available = False # Initialize to False
 
-if active_view_index > 0 and viewed_perm_data and isinstance(viewed_perm_data, tuple) and len(viewed_perm_data) == 4 and viewed_perm_data[1] is not None and not viewed_perm_data[1].empty:
-    s_logs_disp, m_df_disp, t_df_disp, raw_output_disp = viewed_perm_data
-    display_source_info = f"Viewing Results for Permutation Run **#{active_view_index}**"
-    data_to_display_available = True
-    is_displaying_perm_view = True
-elif parsed_main_data and isinstance(parsed_main_data, tuple) and len(parsed_main_data) == 4 and parsed_main_data[1] is not None and not parsed_main_data[1].empty:
-     s_logs_disp, m_df_disp, t_df_disp, raw_output_disp = parsed_main_data
-     source_desc_key = st.session_state.last_loaded_log_file if st.session_state.log_viewer_mode else st.session_state.last_run_trader_file
-     source_mode = "Log File" if st.session_state.log_viewer_mode else "Original Backtest"
-     display_source_info = f"Viewing Results for {source_mode}: **{source_desc_key or 'N/A'}**"
-     data_to_display_available = True
+# --- Print state right before checks ---
+print("\n--- DEBUG DISPLAY: Checking Data Availability ---")
+print(f"  active_view_index: {active_view_index}")
+print(f"  viewed_perm_data type: {type(viewed_perm_data)}")
+if isinstance(viewed_perm_data, tuple) and len(viewed_perm_data) == 4:
+    print(f"  viewed_perm_data market_df type: {type(viewed_perm_data[1])}, empty: {viewed_perm_data[1].empty if viewed_perm_data[1] is not None else 'N/A'}")
 else:
-    # If button was pressed but data isn't available (e.g., first run failed)
-    if run_button_pressed:
-        display_source_info = "Run failed or produced no displayable data. Check console."
-    # Otherwise, initial state message remains
+    print(f"  viewed_perm_data is not a valid tuple.")
 
+print(f"  parsed_main_data type: {type(parsed_main_data)}")
+if isinstance(parsed_main_data, tuple) and len(parsed_main_data) == 5:
+    print(f"  parsed_main_data market_df type: {type(parsed_main_data[1])}, empty: {parsed_main_data[1].empty if parsed_main_data[1] is not None else 'N/A'}")
+else:
+    print(f"  parsed_main_data is not a valid tuple (expected 5 elements). Length: {len(parsed_main_data) if isinstance(parsed_main_data, tuple) else 'N/A'}")
+# --- End Print state ---
+
+if active_view_index > 0 and viewed_perm_data and isinstance(viewed_perm_data, tuple) and len(viewed_perm_data) == 4 and viewed_perm_data[1] is not None:
+    if not viewed_perm_data[1].empty: # Check if market_df (index 1) is not empty
+        print("DEBUG DISPLAY: Condition met for displaying permutation view.") # Add Print
+        s_logs_disp, m_df_disp, t_df_disp, raw_output_disp = viewed_perm_data
+        display_source_info = f"Viewing Results for Permutation Run **#{active_view_index}**"
+        data_to_display_available = True
+        is_displaying_perm_view = True
+    else:
+         print(f"DEBUG DISPLAY: Permutation view selected ({active_view_index}), but market data empty.")
+         st.warning(f"Data for permutation {active_view_index} seems empty, showing original run if available.")
+         active_view_index = 0
+         st.session_state.view_permutation_index = 0
+# Check Original/Log View Data if not displaying perm view OR if perm view was empty
+# Make sure to check the correct tuple length (5) now
+if not is_displaying_perm_view and parsed_main_data and isinstance(parsed_main_data, tuple) and len(parsed_main_data) == 5:
+     print("DEBUG DISPLAY: Checking parsed_main_data (length 5 tuple)...") # Add Print
+     # Check if market_df (index 1) is not None and not empty
+     market_df_from_state = parsed_main_data[1]
+     if market_df_from_state is not None and isinstance(market_df_from_state, pd.DataFrame) and not market_df_from_state.empty:
+        print("DEBUG DISPLAY: Condition met for displaying original/log view.") # Add Print
+        s_logs_disp, m_df_disp, t_df_disp, raw_output_disp, _ = parsed_main_data # Unpack 5, ignore cache here
+        source_desc_key = st.session_state.last_loaded_log_file if st.session_state.log_viewer_mode else st.session_state.last_run_trader_file
+        source_mode = "Log File" if st.session_state.log_viewer_mode else "Original Backtest"
+        display_source_info = f"Viewing Results for {source_mode}: **{source_desc_key or 'N/A'}**"
+        data_to_display_available = True # Set to True HERE
+     else:
+          print("DEBUG DISPLAY: Original parsed data's market data check failed (None, not DataFrame, or empty).")
+          # data_to_display_available remains False
+else:
+     # Add print to show why this block was skipped
+     print(f"DEBUG DISPLAY: Skipped original/log view check. is_displaying_perm_view={is_displaying_perm_view}, parsed_main_data valid tuple(5)={isinstance(parsed_main_data, tuple) and len(parsed_main_data) == 5}")
+
+# if active_view_index > 0 and viewed_perm_data and isinstance(viewed_perm_data, tuple) and len(viewed_perm_data) == 4 and viewed_perm_data[1] is not None and not viewed_perm_data[1].empty:
+#     s_logs_disp, m_df_disp, t_df_disp, raw_output_disp = viewed_perm_data
+#     display_source_info = f"Viewing Results for Permutation Run **#{active_view_index}**"
+#     data_to_display_available = True
+#     is_displaying_perm_view = True
+# elif parsed_main_data and isinstance(parsed_main_data, tuple) and len(parsed_main_data) == 4 and parsed_main_data[1] is not None and not parsed_main_data[1].empty:
+#      s_logs_disp, m_df_disp, t_df_disp, raw_output_disp = parsed_main_data
+#      source_desc_key = st.session_state.last_loaded_log_file if st.session_state.log_viewer_mode else st.session_state.last_run_trader_file
+#      source_mode = "Log File" if st.session_state.log_viewer_mode else "Original Backtest"
+#      display_source_info = f"Viewing Results for {source_mode}: **{source_desc_key or 'N/A'}**"
+#      data_to_display_available = True
+# else:
+#     # If button was pressed but data isn't available (e.g., first run failed)
+#     if run_button_pressed:
+#         display_source_info = "Run failed or produced no displayable data. Check console."
+#     # Otherwise, initial state message remains
+# Handle the case where the button was pressed but neither condition above was met
+if not data_to_display_available:
+    # Check run_button_pressed state more carefully if needed
+    # button_pressed_flag = st.session_state.get('run_button_pressed_flag', False) # Need to set this flag when button is pressed
+    if run_button_pressed: # Simple check if button press led here
+        print("DEBUG DISPLAY: data_to_display_available is False after run button press.") # Add Print
+        display_source_info = "Run failed or produced no displayable data. Check console logs for parsing errors."
+    else: # Initial state before any button press
+        display_source_info = "Configure parameters and run."
 
 with results_area: # Display Area
     if not data_to_display_available:
@@ -846,6 +1050,10 @@ with results_area: # Display Area
     else:
         st.subheader("Run Summary")
         st.caption(display_source_info)
+        inferred_cache_disp = {}
+        if not is_displaying_perm_view and not st.session_state.log_viewer_mode:
+            if parsed_main_data and isinstance(parsed_main_data, tuple) and len(parsed_main_data) == 5:
+                 inferred_cache_disp = parsed_main_data[4]
         perm_results = st.session_state.get('permutation_results', {})
         tabs_list = ["📊 Charts"]
         if not st.session_state.log_viewer_mode and perm_results and perm_results.get('permuted_pnls_raw'):
@@ -868,6 +1076,10 @@ with results_area: # Display Area
                 display_norm_price_chart(m_df_disp, chart_title_prefix)
                 st.divider()
                 display_fill_dist_chart(m_df_disp, t_df_disp, chart_title_prefix, is_permutation_run=is_displaying_perm_view)
+                st.divider()
+                # --- CALL NEW CHART (Only for original run) ---
+                if not is_displaying_perm_view and not st.session_state.log_viewer_mode:
+                    display_inferred_liquidity_chart(m_df_disp, inferred_cache_disp, chart_title_prefix)
 
         if "🧪 Permutation Test" in tab_map: # Permutation Tab
             with tab_map["🧪 Permutation Test"]:
