@@ -14,17 +14,35 @@ from typing import Any, Dict, List, Literal, TextIO, Tuple, Optional
 
 import pandas as pd
 
-# Assuming datamodel.py is in the same directory or accessible
+# --- ISOLATED IMPORT TEST ---
+print("DEBUG backtester.py: Attempting relative imports...")
 try:
+    print("  Trying: from .datamodel import ...")
     from .datamodel import Order, Listing, Observation, OrderDepth, Trade, TradingState
-    from . import constants
-    from . import util
-except ImportError:
-    # Fallback for running script directly
-    from datamodel import Order, Listing, Observation, OrderDepth, Trade, TradingState
-    import constants
-    import util
+    print("  SUCCESS: datamodel imported.")
 
+    print("  Trying: from . import constants")
+    from . import constants
+    print("  SUCCESS: constants imported.")
+
+    print("  Trying: from . import util")
+    from . import util
+    print("  SUCCESS: util imported.")
+
+except ImportError as e:
+    print(f"  FAILED relative import: {e}")
+    print("  Falling back to direct imports (likely incorrect for package execution)...")
+    # Fallback for running script directly
+    try:
+        from datamodel import Order, Listing, Observation, OrderDepth, Trade, TradingState
+        import constants
+        import util
+        print("  Fallback direct imports succeeded (unexpected).")
+    except ModuleNotFoundError:
+         print("  Fallback direct imports failed as expected.")
+         # Re-raise the original error to see it clearly
+         raise e
+# --- END ISOLATED IMPORT TEST ---
 Symbol = str
 
 script_dir_backtester = os.path.dirname(os.path.abspath(__file__))
