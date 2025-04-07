@@ -61,3 +61,45 @@ How it works: This backtester uses a second orderbook that simulates bot reactio
 *   `output/`: (Optional) Directory where output logs might be saved (if implemented).
 *   `README.md`: This file.
 *   `run.bat` / `run.sh`: (Optional) Helper scripts to automate setup and launch.
+
+
+
+## Setup (Using Anaconda/Miniconda)
+
+1.  **Prerequisites:**
+    *   Anaconda or Miniconda installed.
+
+2.  **Clone or Download:**
+    *   Get the project code: `git clone <repository_url>` or download the ZIP file.
+    *   Open an **Anaconda Prompt** or your standard terminal where `conda` is activated.
+    *   Navigate into the project directory: `cd path/to/prosperity-backtester`
+
+3.  **Create Conda Environment:**
+    *   Run the following command in the project directory (where `environment.yml` is located):
+      ```bash
+      conda env create -f environment.yml
+      ```
+    *   This will create a new Conda environment named `prosperity_backtester_env` (or whatever you named it in the file) with all the specified packages. This might take a few minutes.
+
+4.  **Activate the Environment:**
+    *   Each time you want to run the app, you need to activate the environment:
+      ```bash
+      conda activate prosperity_backtester_env
+      ```
+    *   You should see `(prosperity_backtester_env)` at the beginning of your terminal prompt.
+
+## Running the App
+
+1.  **Make sure the Conda environment is active:** `conda activate prosperity_backtester_env`
+2.  **Navigate to the project directory** in your terminal (the one containing `app.py`).
+3.  **Run the Streamlit app:**
+    ```bash
+    streamlit run app.py
+    ```
+4.  The application should automatically open in your default web browser.
+
+## Updating the Environment
+
+If the requirements change (`environment.yml` is updated), you can update your existing environment:
+```bash
+conda env update --name prosperity_backtester_env --file environment.yml --prune

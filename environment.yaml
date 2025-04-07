@@ -1,0 +1,19 @@
+ # environment.yml
+ name: prosperity_backtester_env # Choose a descriptive name
+
+ channels:
+   - conda-forge # Recommended channel for many packages
+   - defaults
+
+ dependencies:
+   - python=3.9 # Or 3.10, 3.11 - specify a compatible version
+   - pip         # Include pip itself as a conda package
+   - pandas      # Get core libraries via conda if possible
+   - numpy
+   - plotly
+   - scipy       # Needed by plotly figure factory distplot curve
+
+   - pip: # List packages to be installed via pip AFTER conda setup
+       - streamlit
+       # Add any other packages ONLY available on PyPI
+       # - some_other_pip_package
