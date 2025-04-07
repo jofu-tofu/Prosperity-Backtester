@@ -80,7 +80,7 @@ class Backtester:
         self.activity_log_output = pd.DataFrame()
         self.final_activity_log = pd.DataFrame() # For finalized output
 
-        self.position_limit: Dict[Symbol, int] = {p: constants.POSITION_LIMITS.get(p, 20) for p in self.products}
+        self.position_limit: Dict[Symbol, int] = {p: constants.POSITION_LIMITS.get(p, 50) for p in self.products}
         self.fair_price_calc: Dict[Symbol, Any] = {p: constants.FAIR_MKT_VALUE.get(p, constants.mid_price) for p in self.products}
 
         if not hasattr(self, 'market_data') or self.market_data.empty:

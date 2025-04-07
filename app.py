@@ -871,15 +871,52 @@ with st.sidebar:
                     st.code(trader_code, language="python")
         st.subheader("2. Select Data Log(s)")
         try:
-            data_files = sorted([f for f in os.listdir(DATA_DIR_ABS) if f.endswith(".log")])
+            # Get all available log files
+            all_data_files = sorted([f for f in os.listdir(DATA_DIR_ABS) if f.endswith(".log")])
+        except FileNotFoundError:
+            st.error(f"Data directory not found at {DATA_DIR_ABS}")
+            all_data_files = []
         except Exception as e:
-            st.error(f"Data dir err: {e}")
-            data_files = []
-        if not data_files:
-            st.warning(f"No logs in {DATA_DIR_ABS}.")
+             st.error(f"Error listing data files: {e}")
+             all_data_files = []
+
+        # --- Session State for Multiselect Default ---
+        # Initialize if it doesn't exist
+        if 'data_select_default' not in st.session_state:
+            # Default to the first file if available, otherwise empty list
+            st.session_state.data_select_default = [all_data_files[0]] if all_data_files else []
+
+        # --- Attach All Button ---
+        col1, col2 = st.columns([3, 1]) # Adjust ratio as needed
+        with col1:
+             # The label for the multiselect itself
+             st.caption("Log Files (first file is primary):")
+        with col2:
+             # Place button next to the label
+             if st.button("All", key="attach_all_logs", help="Select all available log files."):
+                 # When button is clicked, update the session state for the default
+                 st.session_state.data_select_default = all_data_files
+                 # No need to rerun here, Streamlit handles it after button click
+
+        # --- Multiselect Widget ---
+        if not all_data_files:
+            st.warning(f"No log files found in data directory: {DATA_DIR_ABS}")
+            selected_data_fnames = [] # Ensure it's an empty list if no files
         else:
-            default_selection = [data_files[0]] if data_files else None
-            selected_data_fnames = st.multiselect("Log Files (first primary):", data_files, default=default_selection, key="data_select", label_visibility="collapsed")
+            # Use the session state variable as the default selection
+            selected_data_fnames = st.multiselect(
+                "Log Files (multiselect):", # Use a different label for screen readers if needed
+                all_data_files,
+                default=st.session_state.data_select_default, # Set default from session state
+                key="data_select", # Keep the key consistent
+                label_visibility="collapsed" # Hide the actual label "Log Files (multiselect):"
+            )
+            # Update session state if the user manually changes the selection
+            # This ensures the state reflects manual changes for the next rerun
+            if selected_data_fnames != st.session_state.data_select_default:
+                 st.session_state.data_select_default = selected_data_fnames
+
+        # --- End Data Log Selection ---
         st.subheader("3. Settings")
         col_a, col_b = st.columns(2)
         with col_a:
@@ -1222,9 +1259,14 @@ with results_area:
 
         if "📜 Logs & Output" in tab_map: # Logs Tab
             with tab_map["📜 Logs & Output"]:
-                st.subheader("Execution Logs"); logs_to_use = s_logs_disp; output_content_to_use = raw_output_disp; log_source_info = display_source_info
+                st.subheader("Execution Logs")
+                logs_to_use = s_logs_disp
+                output_content_to_use = raw_output_disp
+                log_source_info = display_source_info
                 st.caption(f"Displaying logs for: {log_source_info}")
+
                 if logs_to_use:
+                    # ... (Sandbox/Lambda log display logic - remains the same) ...
                     st.text(f"Showing {len(logs_to_use)} log entries (newest first):")
                     for i, log_entry in enumerate(reversed(logs_to_use)):
                          ts = log_entry.get("timestamp", "N/A"); sbox = log_entry.get("sandboxLog", ""); lamb = log_entry.get("lambdaLog", "")
@@ -1232,20 +1274,51 @@ with results_area:
                              with st.expander(f"Timestamp {ts}", expanded=(i < 5)):
                                  if lamb: st.text("Trader Output:"); st.code(lamb, language=None)
                                  if sbox: st.text("Sandbox Messages:"); st.code(sbox, language=None)
-                else: st.info("No execution logs available.")
+                else:
+                    st.info("No execution logs available.")
+
+                # --- Add Trade History Table ---
+                st.divider()
+                st.subheader("Trade History Details")
+                trades_to_display = t_df_disp # Use the trades DataFrame determined earlier
+
+                if trades_to_display is not None and not trades_to_display.empty:
+                    st.caption(f"Displaying {len(trades_to_display)} trades from this run/log.")
+                    # Prepare DataFrame for display (e.g., reset index if needed, select/order columns)
+                    display_trades_df = trades_to_display.copy()
+                    if display_trades_df.index.name == 'timestamp':
+                        display_trades_df.reset_index(inplace=True)
+
+                    # Select and order columns for better readability
+                    trade_cols_order = ['timestamp', 'symbol', 'price', 'quantity', 'buyer', 'seller']
+                    # Include other columns if they exist
+                    present_trade_cols = [col for col in trade_cols_order if col in display_trades_df.columns]
+                    other_trade_cols = sorted([col for col in display_trades_df.columns if col not in present_trade_cols])
+                    final_trade_cols = present_trade_cols + other_trade_cols
+
+                    # Ensure timestamp is first if present
+                    if 'timestamp' in final_trade_cols:
+                         final_trade_cols.insert(0, final_trade_cols.pop(final_trade_cols.index('timestamp')))
+
+                    st.dataframe(display_trades_df[final_trade_cols], use_container_width=True)
+                else:
+                    st.info("No trade history available for this view.")
+                # --- End Trade History Table ---
+
+
+                # --- Raw Output Log Section ---
                 if st.session_state.show_output_log_state:
-                     st.divider(); st.subheader("Raw Output Log Content")
-                     if output_content_to_use:
-                         st.text_area("Raw Output:", output_content_to_use, height=400, key="output_log_area")
-                         try: # Download Button
-                              fname_trader = "log_view"; fname_log = "unknown_log"; fname_suffix = ""
-                              if is_displaying_perm_view: fname_trader = st.session_state.permutation_rerun_args.get('trader_file','unk').replace('.py',''); fname_log = st.session_state.permutation_rerun_args.get('data_files',['unk'])[0].replace('.log',''); fname_suffix = f"_perm{st.session_state.view_permutation_index}"
-                              elif is_log_viewer: fname_log = st.session_state.last_loaded_log_file.replace('.log','') if st.session_state.last_loaded_log_file else 'unk'
-                              else: fname_trader = st.session_state.last_run_trader_file.replace('.py','') if st.session_state.last_run_trader_file else 'unk'; fname_log = selected_data_fnames[0].replace('.log','') if selected_data_fnames else 'unk'; fname_suffix = "_original"
-                              download_filename = f"output_{fname_trader}_{fname_log}{fname_suffix}.log"
-                              st.download_button(label="📥 Download Output Log", data=output_content_to_use, file_name=download_filename, mime="text/plain", use_container_width=True)
-                         except Exception as dl_err: st.warning(f"Download link error: {dl_err}")
-                     else: st.warning("No raw output.")
+                    st.divider()
+                    st.subheader("Raw Output Log Content")
+                    try: # Download Button
+                        fname_trader = "log_view"; fname_log = "unknown_log"; fname_suffix = ""
+                        if is_displaying_perm_view: fname_trader = st.session_state.permutation_rerun_args.get('trader_file','unk').replace('.py',''); fname_log = st.session_state.permutation_rerun_args.get('data_files',['unk'])[0].replace('.log',''); fname_suffix = f"_perm{st.session_state.view_permutation_index}"
+                        elif is_log_viewer: fname_log = st.session_state.last_loaded_log_file.replace('.log','') if st.session_state.last_loaded_log_file else 'unk'
+                        else: fname_trader = st.session_state.last_run_trader_file.replace('.py','') if st.session_state.last_run_trader_file else 'unk'; fname_log = selected_data_fnames[0].replace('.log','') if selected_data_fnames else 'unk'; fname_suffix = "_original"
+                        download_filename = f"output_{fname_trader}_{fname_log}{fname_suffix}.log"
+                        st.download_button(label="📥 Download Output Log", data=output_content_to_use, file_name=download_filename, mime="text/plain", use_container_width=True)
+                    except Exception as dl_err: st.warning(f"Download link error: {dl_err}")
+                else: st.warning("No raw output.")
 
         if "Info" in tab_map: 
             with tab_map["Info"]: st.info("Configure and run.") # Fallback
