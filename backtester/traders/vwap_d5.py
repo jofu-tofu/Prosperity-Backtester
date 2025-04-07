@@ -1,4 +1,4 @@
-from backtester.datamodel import OrderDepth, UserId, TradingState, Order
+from datamodel import OrderDepth, UserId, TradingState, Order
 from typing import List
 import string
 import numpy as np
@@ -7,7 +7,7 @@ import jsonpickle
 class Trader:
     MAX_KELP_POSITION = 50
     MAX_RESIN_POSITION = 50
-    products = ['KELP', 'RAINFOREST_RESIN']
+    products = ['KELP', 'RAINFOREST_RESIN', 'SQUID_INK']
     
     def run(self, state: TradingState):
         print("Current Positions: " + str(state.position))
@@ -35,13 +35,12 @@ class Trader:
             rounded_vwap = round(current_vwap)
             orders = []
             if current_pos != 0:
-                orders.append(Order(product, rounded_vwap-int(2*current_pos/abs(current_pos)), -current_pos))
+                orders.append(Order(product, rounded_vwap-int(3*current_pos/abs(current_pos)), -current_pos))
             max_buy = -current_pos + self.MAX_KELP_POSITION
             max_sell = -current_pos - self.MAX_KELP_POSITION
-            orders.append(Order(product, rounded_vwap-1, int(max_buy//3)))
-            orders.append(Order(product, rounded_vwap, int(max_sell//3))) # Buy at VWAP-1 if possible
+            orders.append(Order(product, rounded_vwap-5, int(max_buy//3)))
+            orders.append(Order(product, rounded_vwap+5, int(max_sell//3))) # Buy at VWAP-1 if possible
             result[product] = orders
-            print("Orders: " + str(orders))
         conversions = 1
         traderData = jsonpickle.encode(traderData)
         return result, conversions, traderData

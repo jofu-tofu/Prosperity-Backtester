@@ -115,5 +115,6 @@ POSITION_LIMITS: Dict[str, int] = {
     #  "ORCHIDS": 100,
      "KELP": 50, # Example limit, VERIFY
      "RAINFOREST_RESIN": 50, # Example limit, VERIFY
+     "SQUID INK": 50
      # Add any other known traded products here with their CORRECT limits
 }

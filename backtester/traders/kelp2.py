@@ -1,6 +1,6 @@
 from typing import List
 
-from datamodel import Order, OrderDepth, TradingState
+from backtester.datamodel import Order, OrderDepth, TradingState
 
 
 class Trader:

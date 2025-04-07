@@ -633,7 +633,6 @@ def display_inferred_liquidity_chart(
     processed_timestamps_inferred = 0
     processed_timestamps_explicit = 0
     skipped_timestamps_vwap = 0
-    print('DEBUG: Explicit Cache:', explicit_cache)
     # Combine timestamps from both caches to iterate through all relevant times
     all_timestamps = sorted(list(set(inferred_cache.keys()) | set(explicit_cache.keys())))
     print(f"  Processing {len(all_timestamps)} unique timestamps from both caches.")
