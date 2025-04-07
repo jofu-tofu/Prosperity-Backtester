@@ -12,21 +12,86 @@ import plotly.figure_factory as ff
 import plotly.graph_objects as go
 import streamlit as st
 
-# Import backtester components (assuming previous robust imports)
+# --- START OF FILE app.py ---
+import sys
+import os
+import importlib.util # Import the necessary module
+
+# --- Explicitly Load Backtester Package ---
 try:
+    print("Attempting to load backtester package explicitly...")
+    # Get the absolute path to the directory containing app.py (project root)
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    print(f"Project root determined as: {project_root}")
+
+    # Construct the path to the backtester module's __init__.py
+    backtester_init_path = os.path.join(project_root, 'backtester', '__init__.py')
+    print(f"Looking for backtester init at: {backtester_init_path}")
+
+    # Create a module spec from the file location
+    spec = importlib.util.spec_from_file_location("backtester", backtester_init_path)
+
+    if spec is None:
+        raise ImportError(f"Could not create module spec for backtester. Check path: {backtester_init_path}")
+
+    # Create the module based on the spec
+    bt_package = importlib.util.module_from_spec(spec)
+
+    if bt_package is None:
+         raise ImportError(f"Could not create module from spec for backtester.")
+
+    # Add the module to sys.modules *before* executing it
+    # This makes sub-module imports within the package work later (e.g., from . import util)
+    sys.modules["backtester"] = bt_package
+
+    # Execute the module (runs the __init__.py, making the package usable)
+    spec.loader.exec_module(bt_package)
+
+    print("Successfully loaded 'backtester' package via importlib.")
+
+    # Now try importing specific modules *from* the loaded package
     from backtester import backtester as bt_module
     from backtester import util, constants
-except ImportError:
-    st.error("Fatal Error: Could not import backtester modules. Check file structure and imports.")
-    st.stop()
+    print("Successfully imported specific modules from backtester.")
 
+except FileNotFoundError:
+    st.error(f"Fatal Error: 'backtester/__init__.py' not found relative to app.py. Expected at: {backtester_init_path}")
+    print(f"ERROR: FileNotFoundError for {backtester_init_path}")
+    print(f"Current working directory: {os.getcwd()}")
+    st.stop()
+except ImportError as e:
+    st.error(f"Fatal Error: Could not import backtester modules using importlib: {e}")
+    print(f"--- Import Error Details (importlib) ---")
+    traceback.print_exc()
+    print(f"sys.path: {sys.path}")
+    print(f"Current Working Directory: {os.getcwd()}")
+    print("--- End Import Error Details ---")
+    st.stop()
+except Exception as e:
+     st.error(f"An unexpected error occurred during backtester import: {e}")
+     traceback.print_exc()
+     st.stop()
+# --- End Explicit Load ---
+
+
+# --- Rest of your imports ---
+import io
+import time
+import traceback
+import hashlib # For seeding per product
+# ... etc ...
+
+# --- Permutation Utils Import ---
+# Try importing this relative to the loaded backtester package
 try:
     from backtester import permutation_utils as perm_utils
 except ImportError:
     try:
+        # Fallback if permutation_utils is somehow not inside backtester dir
         import permutation_utils as perm_utils
     except ImportError:
         perm_utils = None # Permutations disabled
+# ... (rest of app.py as before) ...
 
 from typing import List, Dict, Tuple, Optional, Any
 
