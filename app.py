@@ -591,157 +591,158 @@ def display_fill_dist_chart(market_df: pd.DataFrame, trades_df: pd.DataFrame, ti
 
 # In app.py
 
-def display_inferred_liquidity_chart(market_df: pd.DataFrame, inferred_cache: Dict[int, Dict[str, Any]], title_prefix: str):
-    """Displays inferred liquidity volume and relative price vs VWAP."""
-    st.markdown("##### Inferred Liquidity Book (Relative to VWAP) Based on Logs Given") # Title updated
-    print(f"\n--- DEBUG Inferred Chart START ({title_prefix}) ---")
+def display_inferred_liquidity_chart(
+    market_df: pd.DataFrame,
+    inferred_cache: Dict[int, Dict[str, Any]],
+    explicit_cache: Dict[int, Dict[str, Any]], # Add explicit cache argument
+    title_prefix: str
+    ):
+    """Displays BOTH inferred and explicit liquidity volume and relative price vs VWAP."""
+    # Update title to reflect both books
+    st.markdown("##### Explicit & Inferred Liquidity Books (Relative to VWAP)")
+    print(f"\n--- DEBUG Combined Book Chart START ({title_prefix}) ---")
 
-    if market_df.empty:
-        st.info(f"Inferred Chart: No Activity Log data (needed for VWAP) ({title_prefix}).")
-        print(f"--- END Inferred ({title_prefix}): market_df empty ---")
-        return
-    if not inferred_cache:
-        st.info(f"Inferred Chart: Inferred liquidity cache is empty ({title_prefix}).")
-        print(f"--- END Inferred ({title_prefix}): inferred_cache empty ---")
-        return
+    # Initial checks for market_df (needed for VWAP)
+    if market_df.empty: st.info(f"Combined Book Chart: No market data ({title_prefix})."); print(f"--- END Combined: market_df empty ---"); return
+    # Check if *at least one* cache has data
+    if not inferred_cache and not explicit_cache: st.info(f"Combined Book Chart: Both inferred and explicit caches are empty ({title_prefix})."); print(f"--- END Combined: Both caches empty ---"); return
 
     # --- Prepare Data & Ensure/Calculate VWAP ---
+    # (VWAP Preparation logic remains the same as before)
     market_data_processed = market_df.copy()
+    # ... (Reset index, check timestamp/product cols) ...
     if market_data_processed.index.name == 'timestamp': market_data_processed.reset_index(inplace=True)
-    elif 'timestamp' not in market_data_processed.columns: st.warning(f"Inferred Chart: Ts missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Ts ---"); return
+    elif 'timestamp' not in market_data_processed.columns: st.warning(f"Combined Chart: Ts missing ({title_prefix})."); print(f"--- END Combined: No Ts ---"); return
     market_data_processed['timestamp'] = pd.to_numeric(market_data_processed['timestamp'], errors='coerce'); market_data_processed.dropna(subset=['timestamp'], inplace=True)
-    if 'product' not in market_data_processed.columns: st.warning(f"Inferred Chart: Product missing ({title_prefix})."); print(f"--- END Inferred ({title_prefix}): No Prod ---"); return
+    if 'product' not in market_data_processed.columns: st.warning(f"Combined Chart: Product missing ({title_prefix})."); print(f"--- END Combined: No Prod ---"); return
     market_data_processed['product'] = market_data_processed['product'].astype(str)
-
     vwap_available = False
-    # Check for existing VWAP first
-    if 'vwap' in market_data_processed.columns and pd.api.types.is_numeric_dtype(market_data_processed['vwap']) and not market_data_processed['vwap'].isna().all():
-        print(f"  Using existing VWAP for Inferred Chart.")
-        vwap_available = True
+    if 'vwap' in market_data_processed.columns and pd.api.types.is_numeric_dtype(market_data_processed['vwap']) and not market_data_processed['vwap'].isna().all(): vwap_available = True
     else:
-        print(f"  Attempting VWAP recalculation for Inferred Chart...")
-        try: # Calculate VWAP on the whole market df
-            price_vol_cols=[f'{s}_{t}_{l}' for s in ['bid','ask'] for t in ['price','volume'] for l in [1,2,3]]
-            for col in price_vol_cols:
-                 if col in market_data_processed.columns:
-                      if not pd.api.types.is_numeric_dtype(market_data_processed[col]):
-                          market_data_processed[col] = pd.to_numeric(market_data_processed[col], errors='coerce')
-            market_data_processed['vwap'] = market_data_processed.apply(calculate_row_vwap, axis=1)
-            if 'product' in market_data_processed.columns:
-                market_data_processed['vwap'] = market_data_processed.groupby('product')['vwap'].ffill().bfill()
-            if 'vwap' in market_data_processed.columns and not market_data_processed['vwap'].isna().all():
-                vwap_available = True
-                print(f"  VWAP recalculation successful for Inferred Chart.")
-            else:
-                print(f"  VWAP recalculation failed or all NaN for Inferred Chart.")
-        except Exception as e:
-            print(f"Error calculating VWAP for Inferred Chart ({title_prefix}): {e}")
-
-    if not vwap_available:
-        st.warning(f"Inferred Chart: VWAP unavailable ({title_prefix}). Cannot calculate relative prices.")
-        print(f"--- END Inferred ({title_prefix}): VWAP unavailable ---")
-        return
+        try: # Calculate VWAP
+             price_vol_cols=[f'{s}_{t}_{l}' for s in ['bid','ask'] for t in ['price','volume'] for l in [1,2,3]]
+             for col in price_vol_cols:
+                  if col in market_data_processed.columns and not pd.api.types.is_numeric_dtype(market_data_processed[col]): market_data_processed[col] = pd.to_numeric(market_data_processed[col], errors='coerce')
+             market_data_processed['vwap'] = market_data_processed.apply(calculate_row_vwap, axis=1).groupby(market_data_processed['product']).ffill().bfill() # Group by product during fill
+             if 'vwap' in market_data_processed.columns and not market_data_processed['vwap'].isna().all(): vwap_available = True
+        except Exception as e: print(f"Error calculating VWAP for Combined Chart ({title_prefix}): {e}")
+    if not vwap_available: st.warning(f"Combined Chart: VWAP unavailable ({title_prefix})."); print(f"--- END Combined: VWAP unavailable ---"); return
     # --- End VWAP Prep ---
 
-
     processed_data = []
-    skipped_timestamps = 0
-    processed_timestamps = 0
+    processed_timestamps_inferred = 0
+    processed_timestamps_explicit = 0
+    skipped_timestamps_vwap = 0
+    print('DEBUG: Explicit Cache:', explicit_cache)
+    # Combine timestamps from both caches to iterate through all relevant times
+    all_timestamps = sorted(list(set(inferred_cache.keys()) | set(explicit_cache.keys())))
+    print(f"  Processing {len(all_timestamps)} unique timestamps from both caches.")
 
-    # Iterate through timestamps present in the inferred cache
-    for timestamp, product_depths in inferred_cache.items():
-        processed_timestamps += 1
+    for timestamp in all_timestamps:
         # Get corresponding VWAPs from market_df for this timestamp
         vwaps_at_ts = market_data_processed[market_data_processed['timestamp'] == timestamp].set_index('product')['vwap']
         if vwaps_at_ts.empty:
-            skipped_timestamps +=1
+            skipped_timestamps_vwap +=1
             continue # Skip timestamp if no VWAP data found
 
-        for product, inferred_depth in product_depths.items():
-            vwap_price = vwaps_at_ts.get(product) # Get VWAP for this product
-            if pd.isna(vwap_price):
-                continue # Skip product if VWAP is NaN
+        # --- Process INFERRED Data ---
+        if timestamp in inferred_cache:
+            processed_timestamps_inferred += 1
+            product_depths_inferred = inferred_cache[timestamp]
+            for product, inferred_depth in product_depths_inferred.items():
+                vwap_price = vwaps_at_ts.get(product)
+                if pd.isna(vwap_price): continue
+                # Inferred Buys
+                if inferred_depth.buy_orders:
+                    for price, volume in inferred_depth.buy_orders.items():
+                        if volume > 0: processed_data.append({'timestamp': timestamp,'product': product,'relative_price': price - vwap_price,'volume': volume,'type': 'Inferred Buy','original_price': price, 'book': 'Inferred'})
+                # Inferred Sells
+                if inferred_depth.sell_orders:
+                    for price, volume in inferred_depth.sell_orders.items():
+                         if volume < 0: processed_data.append({'timestamp': timestamp,'product': product,'relative_price': price - vwap_price,'volume': abs(volume),'type': 'Inferred Sell','original_price': price, 'book': 'Inferred'})
 
-            # Process Inferred Buys (Bots buying from us)
-            if inferred_depth.buy_orders:
-                for price, volume in inferred_depth.buy_orders.items():
-                    if volume > 0:
-                        relative_price = price - vwap_price # Calculate relative to VWAP
-                        processed_data.append({
-                            'timestamp': timestamp,
-                            'product': product,
-                            'relative_price': relative_price,
-                            'volume': volume,
-                            'type': 'Inferred Buy (vs VWAP)', # Updated label
-                            'original_price': price
-                        })
+        # --- Process EXPLICIT Data ---
+        if timestamp in explicit_cache:
+            processed_timestamps_explicit += 1
+            product_depths_explicit = explicit_cache[timestamp]
+            for product, explicit_depth in product_depths_explicit.items():
+                vwap_price = vwaps_at_ts.get(product)
+                if pd.isna(vwap_price): continue
+                # Explicit Bids
+                if explicit_depth.buy_orders:
+                    for price, volume in explicit_depth.buy_orders.items():
+                         if volume > 0: processed_data.append({'timestamp': timestamp,'product': product,'relative_price': price - vwap_price,'volume': volume,'type': 'Explicit Bid','original_price': price, 'book': 'Explicit'})
+                # Explicit Asks
+                if explicit_depth.sell_orders:
+                    for price, volume in explicit_depth.sell_orders.items():
+                         if volume < 0: processed_data.append({'timestamp': timestamp,'product': product,'relative_price': price - vwap_price,'volume': abs(volume),'type': 'Explicit Ask','original_price': price, 'book': 'Explicit'})
 
-            # Process Inferred Sells (Bots selling to us)
-            if inferred_depth.sell_orders:
-                for price, volume in inferred_depth.sell_orders.items():
-                     if volume < 0: # Inferred sells stored negative
-                        actual_volume = abs(volume)
-                        relative_price = price - vwap_price # Calculate relative to VWAP
-                        processed_data.append({
-                            'timestamp': timestamp,
-                            'product': product,
-                            'relative_price': relative_price,
-                            'volume': actual_volume,
-                            'type': 'Inferred Sell (vs VWAP)', # Updated label
-                            'original_price': price
-                        })
-
-    print(f"  Processed {processed_timestamps} timestamps from inferred cache. Skipped {skipped_timestamps} due to missing VWAP.")
+    print(f"  Processed {processed_timestamps_explicit} explicit timestamps, {processed_timestamps_inferred} inferred timestamps. Skipped {skipped_timestamps_vwap} due to missing VWAP.")
 
     if not processed_data:
-        st.info(f"Inferred Chart: No processable inferred liquidity data found ({title_prefix}).")
-        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - No Data After Processing ---")
+        st.info(f"Combined Book Chart: No processable liquidity data found ({title_prefix}).")
+        print(f"--- DEBUG Combined Chart END ({title_prefix}) - No Data After Processing ---")
         return
 
     plot_df = pd.DataFrame(processed_data)
+    # Ensure correct types for plotting
+    plot_df['volume'] = pd.to_numeric(plot_df['volume'], errors='coerce')
+    plot_df['relative_price'] = pd.to_numeric(plot_df['relative_price'], errors='coerce')
+    plot_df.dropna(subset=['volume', 'relative_price'], inplace=True)
+
     print(f"  Final plot data shape: {plot_df.shape}")
+    if plot_df.empty:
+         st.info(f"Combined Book Chart: Data empty after final cleaning ({title_prefix}).")
+         print(f"--- DEBUG Combined Chart END ({title_prefix}) - Data empty after clean ---"); return
 
     # --- Create Plot ---
     try:
-        # Define colors
+        # Define colors & symbols
         color_map = {
-            'Inferred Buy (vs VWAP)': px.colors.qualitative.Plotly[2], # Example: Green
-            'Inferred Sell (vs VWAP)': px.colors.qualitative.Plotly[3] # Example: Red
+            'Inferred Buy': px.colors.qualitative.Plotly[2], # Green
+            'Inferred Sell': px.colors.qualitative.Plotly[3], # Red
+            'Explicit Bid': px.colors.qualitative.Plotly[0], # Blue
+            'Explicit Ask': px.colors.qualitative.Plotly[9]  # Orange/Brown
+        }
+        symbol_map = { # Use different symbols
+            'Inferred Buy': 'circle',
+            'Inferred Sell': 'circle',
+            'Explicit Bid': 'diamond',
+            'Explicit Ask': 'diamond',
         }
 
         fig = px.scatter(plot_df,
                          x='timestamp',
                          y='relative_price',
                          size='volume',
-                         color='type',
+                         color='type', # Color by combined type
+                         symbol='book', # Use different symbols for Explicit vs Inferred
+                         # symbol_map=symbol_map, # Apply symbol map - Seems symbol map is not directly supported this way in px.scatter color/symbol combo? Let's use color only for now.
                          facet_col='product',
                          color_discrete_map=color_map,
-                         title=f"{title_prefix} - Inferred Liquidity vs. VWAP", # Updated Title
-                         labels={'relative_price': 'Price Relative to VWAP ($)', # Updated Label
-                                 'volume': 'Inferred Volume',
-                                 'type': 'Inferred Order Type',
-                                 'product': 'Product'},
-                         hover_data={'timestamp': True,
-                                     'product': True,
-                                     'relative_price': ':.2f',
-                                     'volume': True,
-                                     'type': True,
-                                     'original_price': True} # Show original price on hover
+                         title=f"{title_prefix} - Explicit & Inferred Books vs. VWAP", # Updated Title
+                         labels={'relative_price': 'Price Relative to VWAP ($)',
+                                 'volume': 'Volume',
+                                 'type': 'Order Type', # Combined type label
+                                 'product': 'Product',
+                                 'book': 'Book Type'}, # Added label for symbol if used
+                         hover_data={'timestamp': True, 'product': True, 'relative_price': ':.2f',
+                                     'volume': True, 'type': True, 'original_price': True, 'book': True}
                         )
 
-        fig.update_layout(height=400, margin=dict(l=20, r=20, t=50, b=20))
+        fig.update_layout(height=450, margin=dict(l=20, r=20, t=50, b=20)) # Increased height slightly
         fig.update_yaxes(zeroline=True, zerolinewidth=2, zerolinecolor='Black') # Highlight VWAP line (y=0)
         fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1])) # Clean facet titles
+        # Make inferred points slightly transparent?
+        # fig.for_each_trace(lambda t: t.update(opacity=0.7) if "Inferred" in t.name else ()) # Might need adjustment based on trace names
 
         st.plotly_chart(fig, use_container_width=True)
-        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - Plotted Successfully ---")
+        print(f"--- DEBUG Combined Chart END ({title_prefix}) - Plotted Successfully ---")
 
     except Exception as e:
-        st.error(f"Error creating Inferred Liquidity chart ({title_prefix}): {e}")
-        print(f"--- DEBUG Inferred Chart END ({title_prefix}) - Plotting Error ---")
+        st.error(f"Error creating Combined Book chart ({title_prefix}): {e}")
+        print(f"--- DEBUG Combined Chart END ({title_prefix}) - Plotting Error ---")
         traceback.print_exc()
-
-
 # --- Session State & Clear/Rerun Functions ---
 # (Initialize, Clear functions remain the same)
 def initialize_session_state():
@@ -1181,7 +1182,22 @@ with results_area:
                 display_fill_dist_chart(m_df_disp, t_df_disp, chart_title_prefix, is_permutation_run=is_displaying_perm_view, is_log_viewer_mode=is_log_viewer); st.divider() # Pass log viewer flag
                 # Inferred Chart (Only for original ACTUAL backtest run)
                 if not is_displaying_perm_view and not is_log_viewer:
-                    display_inferred_liquidity_chart(m_df_disp, inferred_cache_disp_orig, chart_title_prefix)
+                    # Get the ORIGINAL explicit cache from the backtester instance if possible
+                    # This assumes backtester_instance is available in this scope from the original run
+                    explicit_cache_orig = {}
+                    if 'backtester_instance' in locals() and backtester_instance and hasattr(backtester_instance, 'explicit_order_depths_cache'):
+                         explicit_cache_orig = backtester_instance.explicit_order_depths_cache
+                    elif parsed_main_data and len(parsed_main_data) == 5:
+                         # Fallback: Try re-parsing original explicit if instance not available? Less ideal.
+                         pass # Or maybe disable chart if explicit not found
+
+                    # inferred_cache_disp_orig was unpacked earlier
+                    display_inferred_liquidity_chart(
+                        m_df_disp,
+                        inferred_cache_disp_orig, # Pass inferred cache
+                        explicit_cache_orig,       # Pass explicit cache
+                        chart_title_prefix
+                        )
 
         if "🧪 Permutation Test" in tab_map: # Permutation Tab
             with tab_map["🧪 Permutation Test"]:
