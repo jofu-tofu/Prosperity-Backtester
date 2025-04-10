@@ -5,9 +5,9 @@ import numpy as np
 import jsonpickle
 
 class Trader:
-    MAX_KELP_POSITION = 50
-    MAX_RESIN_POSITION = 50
-    products = ['KELP', 'RAINFOREST_RESIN', 'SQUID_INK']
+
+    product_max_positions = {'KELP': 50, 'RAINFOREST_RESIN': 50, 'SQUID_INK': 50, 'CROISSANTS': 250,
+                             "JAMS": 350, "DJEMBES": 60, "PICNIC_BASKET1": 60, "PICNIC_BASKET2": 100}
     
     def run(self, state: TradingState):
         print("Current Positions: " + str(state.position))
@@ -16,11 +16,8 @@ class Trader:
         else:
             traderData = {}
         result = {}
-        kelp_orders = []
-        for product in self.products:
+        for product in self.product_max_positions.keys():
             order_depth: OrderDepth = state.order_depths[product]
-            print(product + ' SELL ORDERS: ' + str(order_depth.sell_orders))
-            print(product + ' BUY ORDERS: ' + str(order_depth.buy_orders))
             current_pos = state.position[product] if product in state.position else 0
             total_dolvol = 0
             total_vol = 0
@@ -36,11 +33,12 @@ class Trader:
             orders = []
             if current_pos != 0:
                 orders.append(Order(product, rounded_vwap-int(3*current_pos/abs(current_pos)), -current_pos))
-            max_buy = min(-current_pos + self.MAX_KELP_POSITION, self.MAX_KELP_POSITION)
-            max_sell = max(-current_pos - self.MAX_KELP_POSITION, -self.MAX_KELP_POSITION)
+            max_buy = -current_pos + self.product_max_positions[product]
+            max_sell = -current_pos - self.product_max_positions[product]
             orders.append(Order(product, rounded_vwap-1, int(max_buy//3)))
             orders.append(Order(product, rounded_vwap, int(max_sell//3))) # Buy at VWAP-1 if possible
             result[product] = orders
+            print("Orders: " + str(orders))
         conversions = 1
         traderData = jsonpickle.encode(traderData)
         return result, conversions, traderData

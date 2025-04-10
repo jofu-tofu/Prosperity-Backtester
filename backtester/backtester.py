@@ -49,39 +49,63 @@ script_dir_backtester = os.path.dirname(os.path.abspath(__file__))
 BACKTESTER_BASE_DIR = os.path.dirname(script_dir_backtester)
 TRADER_DIR_ABS = os.path.join(BACKTESTER_BASE_DIR, "backtester", "traders")
 DATA_DIR_ABS = os.path.join(BACKTESTER_BASE_DIR, "data")
-
+CACHE_DIR_ABS = os.path.join(DATA_DIR_ABS, ".cache") # Cache directory within data
+os.makedirs(CACHE_DIR_ABS, exist_ok=True)
 class Backtester:
 
     def __init__(
         self,
         trader_fname: str,
-        data_fnames: List[str],
+        data_fnames: List[str], # This now holds LOG or CSV filenames
         timerange: tuple[int, int] = (0, float('inf')),
         bot_behavior: Literal["none", "eq", "lt", "lte"] = "lte",
         ignore_limits: bool = False,
+        # --- Add arguments to indicate mode ---
+        data_source_mode: Literal["Log Files", "CSV Round Data"] = "Log Files", # Default to logs
+        round_number: Optional[int] = None # Only relevant for CSV mode
+        # --- End Add ---
     ):
         self.trader_path = os.path.join(TRADER_DIR_ABS, trader_fname)
-        self.data_paths = [os.path.join(DATA_DIR_ABS, fname) for fname in data_fnames]
-        print(f"Initializing backtester with trader '{self.trader_path}' and data {self.data_paths}")
-        print(f"Time range: {timerange}, Bot Behavior (Inference/Matching): {bot_behavior}, Ignore Limits: {ignore_limits}")
+        # Store mode and filenames/round info
+        self.data_source_mode = data_source_mode
+        self.data_files = [os.path.join(DATA_DIR_ABS, fname) for fname in data_fnames] # Store full paths
+        self.round_number = round_number
+
+        print(f"Initializing backtester with trader '{self.trader_path}'")
+        print(f"Data Source Mode: {self.data_source_mode}")
+        if self.data_source_mode == "CSV Round Data":
+            print(f"Round Number: {self.round_number}, Files: {[os.path.basename(f) for f in self.data_files]}")
+        else:
+            print(f"Log Files: {[os.path.basename(f) for f in self.data_files]}")
+        print(f"Time range (initial filter for logs): {timerange}, Bot Behavior: {bot_behavior}, Ignore Limits: {ignore_limits}")
 
         self.trader = util.get_trader(self.trader_path)
-        self.start_time, self.end_time = timerange
+        self.start_time, self.end_time = timerange # Used by log loader, maybe less relevant for CSV?
         self.ignore_limits = ignore_limits
-        self.bot_behavior = bot_behavior
+        self.bot_behavior = bot_behavior # Still needed for potential inferred matching if trades added
 
+        # Initialize attributes
         self.listings: Dict[Symbol, Listing] = {}
         self.products: List[Symbol] = []
-        self.market_data = pd.DataFrame() # Stores the raw structure from the primary log
+        self.market_data = pd.DataFrame()
         self.explicit_order_depths_cache: Dict[int, Dict[Symbol, OrderDepth]] = {}
         self.inferred_bot_liquidity_cache: Dict[int, Dict[Symbol, OrderDepth]] = defaultdict(lambda: defaultdict(OrderDepth))
-        self.raw_all_trades = pd.DataFrame() # Stores all trades from all logs
+        self.raw_all_trades = pd.DataFrame()
+        self.combined_books_history: List[Dict[str, Any]] = []
 
-        # Load raw data structures first
-        self._load_and_prepare_data()
+        # --- Call appropriate loading function based on mode ---
+        if self.data_source_mode == "CSV Round Data":
+            self._load_csv_data()
+        else: # Default to Log Files
+            self._load_and_prepare_data() # Existing log loading function
+        # --- End Call ---
+
 
         if not hasattr(self, 'products') or not self.products:
-            raise ValueError("Products not determined after data loading.")
+             # Attempt to get products from constants if loading failed
+             print("Warning: Products not determined from data. Trying constants...")
+             self.products = sorted(list(constants.POSITION_LIMITS.keys()))
+             if not self.products: raise ValueError("Could not determine products from data or constants.")
         print(f"DEBUG __init__: Products determined: {self.products}")
 
         # Initialize state variables AFTER products are known
@@ -93,19 +117,195 @@ class Backtester:
         self.sandbox_logs_capture: List[Dict[str, Any]] = []
         self.all_trades_log_output: List[Dict[str, Any]] = []
         self.last_processed_timestamp: int = -1
-
-        # Activity log structure for output - initialized in run()
         self.activity_log_output = pd.DataFrame()
-        self.final_activity_log = pd.DataFrame() # For finalized output
+        self.final_activity_log = pd.DataFrame()
 
-        self.position_limit: Dict[Symbol, int] = {p: constants.POSITION_LIMITS.get(p, 50) for p in self.products}
+        self.position_limit: Dict[Symbol, int] = {p: constants.POSITION_LIMITS.get(p, 20) for p in self.products}
         self.fair_price_calc: Dict[Symbol, Any] = {p: constants.FAIR_MKT_VALUE.get(p, constants.mid_price) for p in self.products}
 
         if not hasattr(self, 'market_data') or self.market_data.empty:
             print("Warning: Market data structure is empty after loading.")
-            # Consider raising an error if market data is essential for structure
 
         print("Initialization complete.")
+
+    def _combine_order_books(self, explicit_depth: OrderDepth, inferred_depth: OrderDepth) -> OrderDepth:
+        """Merges explicit and inferred order depths for a single product."""
+        combined = OrderDepth()
+
+        # Combine buy orders (sum volumes at same price)
+        all_buy_prices = set(explicit_depth.buy_orders.keys()) | set(inferred_depth.buy_orders.keys())
+        for price in all_buy_prices:
+            vol = explicit_depth.buy_orders.get(price, 0) + inferred_depth.buy_orders.get(price, 0)
+            if vol > 0:
+                combined.buy_orders[price] = vol
+
+        # Combine sell orders (sum volumes at same price)
+        all_sell_prices = set(explicit_depth.sell_orders.keys()) | set(inferred_depth.sell_orders.keys())
+        for price in all_sell_prices:
+            # Remember sells are negative
+            vol = explicit_depth.sell_orders.get(price, 0) + inferred_depth.sell_orders.get(price, 0)
+            if vol < 0:
+                combined.sell_orders[price] = vol
+
+        return combined
+    
+    def _load_csv_data(self):
+        """Loads, adjusts timestamps, and concatenates CSV market data for a specific round, using caching."""
+        print(f"--- Loading CSV Data for Round {self.round_number} ---")
+
+        # --- Define Cache Filename ---
+        # Use round number in the cache filename
+        cache_filename_market = os.path.join(CACHE_DIR_ABS, f"round_{self.round_number}_market_data.pkl")
+        cache_filename_explicit = os.path.join(CACHE_DIR_ABS, f"round_{self.round_number}_explicit_cache.pkl")
+        cache_valid = False
+
+        # --- Attempt to Load from Cache ---
+        if os.path.exists(cache_filename_market) and os.path.exists(cache_filename_explicit):
+            try:
+                print(f"Attempting to load processed data from cache for Round {self.round_number}...")
+                start_cache_load = time.time()
+                self.market_data = pd.read_pickle(cache_filename_market)
+                with open(cache_filename_explicit, 'rb') as f_explicit:
+                     self.explicit_order_depths_cache = pickle.load(f_explicit)
+
+                # Basic validation of loaded data
+                if not isinstance(self.market_data, pd.DataFrame) or self.market_data.empty or \
+                   not isinstance(self.explicit_order_depths_cache, dict):
+                    print("  Cache data invalid format. Re-processing.")
+                    cache_valid = False
+                    self.market_data = pd.DataFrame() # Reset
+                    self.explicit_order_depths_cache = {}
+                else:
+                    cache_valid = True
+                    print(f"  Successfully loaded data from cache in {time.time() - start_cache_load:.2f}s.")
+                    # Determine products from cached market data
+                    self.products = sorted(list(self.market_data['product'].unique())) if 'product' in self.market_data.columns else []
+                    self.listings = {prod: Listing(prod, prod, "SEASHELLS") for prod in self.products}
+                    # Set other necessary attributes based on cache
+                    self.raw_all_trades = pd.DataFrame() # No trades from CSV cache
+                    self.inferred_bot_liquidity_cache = defaultdict(lambda: defaultdict(OrderDepth)) # No inferred from CSV cache
+
+            except Exception as e:
+                print(f"  Error loading from cache: {e}. Re-processing CSVs.")
+                cache_valid = False
+                self.market_data = pd.DataFrame() # Reset
+                self.explicit_order_depths_cache = {}
+        if not cache_valid:
+            print("Processing CSV files...")
+            all_day_dfs = []
+            total_time_offset = 0
+            processed_products = set()
+            files_processed_count = 0
+
+            # data_files should contain the list of CSV filenames found by app.py
+            if not self.data_files:
+                print("ERROR: No CSV filenames provided to _load_csv_data.")
+                # Attempt to find them again based on round number as a fallback?
+                # Or rely on app.py passing the correct list. Let's rely on app.py for now.
+                return
+
+            # Sort files based on the day number extracted from the filename
+            # This ensures concatenation happens in the correct order (Day 0, Day 1, Day 2...)
+            def get_day_num_from_path(filepath):
+                try:
+                    # Assumes format like prices_round_X_day_Y.csv
+                    basename = os.path.basename(filepath)
+                    day_str = basename.split('_')[-1].split('.')[0]
+                    return int(day_str)
+                except (IndexError, ValueError):
+                    print(f"Warning: Could not parse day number from filename: {filepath}")
+                    return -1 # Assign -1 to ensure it comes first if parsing fails, or handle differently
+            # Sort the full paths provided in self.data_files
+            sorted_files = sorted(self.data_files, key=get_day_num_from_path)
+
+            print(f"Processing CSV files in order: {[os.path.basename(f) for f in sorted_files]}")
+
+            for filepath in sorted_files:
+                day_num = get_day_num_from_path(filepath) # Get day number again for logging
+                print(f"  Loading Day {day_num}: {os.path.basename(filepath)}")
+                try:
+                    # Read CSV, assuming semicolon separator and standard header
+                    day_df = pd.read_csv(filepath, sep=';')
+                    print(f"    Read {len(day_df)} rows from {os.path.basename(filepath)}.")
+
+                    # --- Data Validation ---
+                    required_csv_cols = ['timestamp', 'product'] # Absolute minimum
+                    if not all(col in day_df.columns for col in required_csv_cols):
+                        print(f"    WARNING: Skipping file {filepath} - missing required 'timestamp' or 'product' columns.")
+                        continue
+                    # Check for at least one price/volume pair (example)
+                    if not ('bid_price_1' in day_df.columns and 'bid_volume_1' in day_df.columns) and \
+                    not ('ask_price_1' in day_df.columns and 'ask_volume_1' in day_df.columns):
+                        print(f"    WARNING: Skipping file {filepath} - missing at least one bid/ask L1 price/volume pair.")
+                        continue
+
+                    # --- Timestamp Adjustment ---
+                    # Ensure timestamp is numeric BEFORE adding offset
+                    day_df['timestamp'] = pd.to_numeric(day_df['timestamp'], errors='coerce')
+                    day_df.dropna(subset=['timestamp'], inplace=True) # Remove rows with bad timestamps
+                    day_df['timestamp'] = day_df['timestamp'].astype(int)
+
+                    # Adjust based on the *current* total offset (0 for day 0, 1M for day 1, etc.)
+                    print(f"    Adjusting timestamps by offset: +{total_time_offset}")
+                    day_df['timestamp'] = day_df['timestamp'] + total_time_offset
+
+                    # --- Data Cleaning (Optional but Recommended) ---
+                    # Convert price/volume columns to numeric, coercing errors
+                    for col in day_df.columns:
+                        if ('price' in col or 'volume' in col) and col != 'product':
+                            if not pd.api.types.is_numeric_dtype(day_df[col]):
+                                day_df[col] = pd.to_numeric(day_df[col], errors='coerce')
+
+                    # Add 'day' column based on the file being processed
+                    day_df['day'] = day_num # Use the parsed day number
+
+                    # Store DataFrame for concatenation
+                    all_day_dfs.append(day_df)
+                    # Increment offset for the *next* day's file
+                    total_time_offset += constants.TIMESTAMPS_PER_DAY
+                    files_processed_count += 1
+
+                    # Update products found
+                    processed_products.update(day_df['product'].unique())
+
+                except FileNotFoundError:
+                    print(f"    ERROR: File not found: {filepath}")
+                except pd.errors.EmptyDataError:
+                    print(f"    WARNING: File is empty: {filepath}")
+                except Exception as e:
+                    print(f"    ERROR processing file {filepath}: {e}")
+                    traceback.print_exc()
+
+            if not all_day_dfs: print("ERROR: No valid CSV data loaded."); return
+
+            print(f"Concatenating data from {files_processed_count} processed CSV files...")
+            self.market_data = pd.concat(all_day_dfs, ignore_index=False)
+            self.market_data.set_index('timestamp', inplace=True); self.market_data.sort_index(inplace=True)
+            print(f"Final combined market_data shape: {self.market_data.shape}")
+
+            self.products = sorted([p for p in processed_products if isinstance(p, str) and p])
+            self.listings = {prod: Listing(prod, prod, "SEASHELLS") for prod in self.products}
+
+            # Precompute explicit books
+            self._precompute_explicit_order_depths(self.market_data) # Or _by_iteration version
+
+            # Set empty trade/inferred caches
+            self.raw_all_trades = pd.DataFrame()
+            self.inferred_bot_liquidity_cache = defaultdict(lambda: defaultdict(OrderDepth))
+
+            # --- Save Processed Data to Cache ---
+            try:
+                print(f"Saving processed data to cache for Round {self.round_number}...")
+                start_cache_save = time.time()
+                self.market_data.to_pickle(cache_filename_market)
+                with open(cache_filename_explicit, 'wb') as f_explicit:
+                     pickle.dump(self.explicit_order_depths_cache, f_explicit)
+                print(f"  Data saved to cache in {time.time() - start_cache_save:.2f}s.")
+            except Exception as e:
+                print(f"  WARNING: Failed to save data to cache: {e}")
+
+        print("--- Finished Loading CSV Data ---")
+
 
     def _load_and_prepare_data(self):
         print("--- Loading and Preparing Data (Per-Log Inference v2) ---")
@@ -139,8 +339,14 @@ class Backtester:
         else:
             print("Warning: No market data in the specified time range from the primary file.")
             self.explicit_order_depths_cache = {}
-
-        # Process all logs for trades and bot inference
+        # --- DEBUG: Check explicit book for SQUID_INK ---
+        squid_explicit_timestamps = [ts for ts, prods in self.explicit_order_depths_cache.items() if "SQUID_INK" in prods]
+        print(f"DEBUG SQUID: Found {len(squid_explicit_timestamps)} timestamps with explicit SQUID_INK book data.")
+        if squid_explicit_timestamps:
+            sample_ts_explicit = squid_explicit_timestamps[len(squid_explicit_timestamps)//2]
+            print(f"  Sample explicit book @{sample_ts_explicit}: {self.explicit_order_depths_cache[sample_ts_explicit].get('SQUID_INK')}")
+        # --- END DEBUG ---
+        found_squid_submission_trades = False # Flag
         for data_path in self.data_paths:
             print(f"-- Processing log for excess liquidity: '{os.path.basename(data_path)}'")
             try:
@@ -155,6 +361,7 @@ class Backtester:
                 trades_df_filtered = trades_df[
                     (trades_df.index >= self.start_time) & (trades_df.index <= self.end_time)
                 ].copy()
+                
                 if not trades_df_filtered.empty:
                     required_cols = ['symbol', 'price', 'quantity', 'buyer', 'seller']
                     if not all(col in trades_df_filtered.columns for col in required_cols):
@@ -172,7 +379,8 @@ class Backtester:
 
                     # Add all valid trades within the time range to the raw list
                     all_trades_list.append(trades_df_filtered)
-
+                    # --- DEBUG: Check for SQUID_INK trades in this log ---
+                    
                     # Perform inference only on submission trades within the time range
                     submission_trades_this_log = trades_df_filtered[
                         (trades_df_filtered['buyer'] == "SUBMISSION") | (trades_df_filtered['seller'] == "SUBMISSION")
@@ -192,6 +400,10 @@ class Backtester:
                             for prod, prices_data in products_data.items():
                                 for price, vol in prices_data.items():
                                     agg_max_bot_sells[ts][prod][price] = max(agg_max_bot_sells[ts][prod].get(price, 0), vol)
+                        squid_buys_agg = any("SQUID_INK" in prods for ts, prods in log_excess_buys.items())
+                        squid_sells_agg = any("SQUID_INK" in prods for ts, prods in log_excess_sells.items())
+                        if squid_buys_agg or squid_sells_agg:
+                             print(f"    DEBUG SQUID: Inferred liquidity FOUND for SQUID_INK in this log (Buys: {squid_buys_agg}, Sells: {squid_sells_agg}).")
 
                     # Update products based on trades found in *any* log within the time range
                     if 'symbol' in trades_df_filtered.columns:
@@ -278,9 +490,10 @@ class Backtester:
                              # Store sell orders with NEGATIVE volume
                             marginal_depth.sell_orders[price] = -marginal_volume
                         accounted_for_volume = total_volume_at_or_better # Update volume accounted for
-
-                # Assign the calculated marginal depth
+            
                 if marginal_depth.buy_orders or marginal_depth.sell_orders:
+                    self.inferred_bot_liquidity_cache[ts][prod] = marginal_depth
+
                     self.inferred_bot_liquidity_cache[ts][prod] = marginal_depth
                 # else: # Debug if needed
                 #     if max_buy_vol or max_sell_vol:
@@ -288,99 +501,76 @@ class Backtester:
                 #         print(f"  Max Buy Vols: {max_buy_vol}")
                 #         print(f"  Max Sell Vols: {max_sell_vol}")
 
-
-        print(f"Final MARGINAL inferred bot liquidity cache created for {len(self.inferred_bot_liquidity_cache)} timestamps.")
+        # --- Check final cache for SQUID_INK ---
+        squid_inferred_timestamps = [ts for ts, prods in self.inferred_bot_liquidity_cache.items() if "SQUID_INK" in prods]
+        if squid_inferred_timestamps:
+            sample_ts_inferred = squid_inferred_timestamps[len(squid_inferred_timestamps)//2]
+        # --- END Check ---
         # --- END REVISED CACHE BUILDING ---
 
+# In backtester.py
 
-    def _calculate_excess_volume_per_log(self, submission_trades_df: pd.DataFrame, explicit_book_cache: Dict[int, Dict[Symbol, OrderDepth]]):
+    # Add debug_product argument
+    def _calculate_excess_volume_per_log(self, submission_trades_df: pd.DataFrame, explicit_book_cache: Dict[int, Dict[Symbol, OrderDepth]], debug_product: Optional[str] = None):
         """Calculates excess bot liquidity implied by submission trades against explicit books for a single log."""
         log_excess_bot_buys = defaultdict(lambda: defaultdict(Counter)) # What bots must have been BUYING (to fill our sells)
         log_excess_bot_sells = defaultdict(lambda: defaultdict(Counter)) # What bots must have been SELLING (to fill our buys)
         grouped_trades = submission_trades_df.groupby([submission_trades_df.index, 'symbol'])
 
         for (timestamp, product), trades in grouped_trades:
-            # Get the explicit book state *at that timestamp*
-            # Use .get() for safety, default to empty dict/OrderDepth
+            # --- Add Debug Check ---
+            is_debug_product = (product == debug_product)
+            if is_debug_product:
+                 print(f"\n--- DEBUG EXCESS @{timestamp}, Product: {product} ---")
+            # --- End Add ---
+
             initial_explicit_book = explicit_book_cache.get(timestamp, {}).get(product)
             if not initial_explicit_book:
-                # print(f"Debug Excess: No explicit book for {product}@{timestamp}, skipping inference.")
-                continue # Cannot infer without knowing the explicit state
+                if is_debug_product: print("  No explicit book found, cannot infer.")
+                continue
 
-            # Aggregate submission buys/sells at this specific timestamp/product
+            if is_debug_product: print(f"  Explicit Book: Buys={initial_explicit_book.buy_orders}, Sells={initial_explicit_book.sell_orders}")
+
             sub_buys_at_price = Counter()
             sub_sells_at_price = Counter()
             for _, row in trades.iterrows():
-                price = int(row['price'])
-                quantity = int(row['quantity'])
-                if row['buyer'] == "SUBMISSION":
-                    sub_buys_at_price[price] += quantity
-                elif row['seller'] == "SUBMISSION":
-                    sub_sells_at_price[price] += quantity
+                price = int(row['price']); quantity = int(row['quantity'])
+                if row['buyer'] == "SUBMISSION": sub_buys_at_price[price] += quantity
+                elif row['seller'] == "SUBMISSION": sub_sells_at_price[price] += quantity
+
+            if is_debug_product:
+                print(f"  Submission Buys: {dict(sub_buys_at_price)}")
+                print(f"  Submission Sells: {dict(sub_sells_at_price)}")
 
             # Simulate OUR BUYS against the explicit SELL side
             if sub_buys_at_price:
-                explicit_sells_copy = copy.deepcopy(initial_explicit_book.sell_orders) # Operate on a copy
+                explicit_sells_copy = copy.deepcopy(initial_explicit_book.sell_orders)
                 our_buy_fills_vs_explicit = Counter()
-                # Iterate through our buy prices (ascending)
+                if is_debug_product: print("  Simulating OUR BUYS vs Explicit Sells...")
                 for sub_p in sorted(sub_buys_at_price.keys()):
-                    our_buy_vol_at_p = sub_buys_at_price[sub_p]
-                    vol_remaining_to_fill = our_buy_vol_at_p
-                    # Iterate through available explicit sell prices (ascending)
-                    for book_p in sorted(explicit_sells_copy.keys()):
-                        if vol_remaining_to_fill <= 0: break
-                        if book_p > sub_p: continue # Explicit ask is higher than our buy price, no match
-
-                        book_v = abs(explicit_sells_copy[book_p])
-                        filled_on_explicit = min(vol_remaining_to_fill, book_v)
-
-                        if filled_on_explicit > 0:
-                            our_buy_fills_vs_explicit[sub_p] += filled_on_explicit
-                            explicit_sells_copy[book_p] += filled_on_explicit # Consume volume (+ makes it closer to 0)
-                            vol_remaining_to_fill -= filled_on_explicit
-                            if explicit_sells_copy[book_p] == 0:
-                                del explicit_sells_copy[book_p]
-
-                    # Calculate excess: Our total buy volume at this price MINUS what the explicit book filled
-                    excess_needed_from_bots = our_buy_vol_at_p - our_buy_fills_vs_explicit[sub_p]
+                    # ... (matching logic vs explicit_sells_copy) ...
+                     # Calculate excess: Our total buy volume at this price MINUS what the explicit book filled
+                    excess_needed_from_bots = sub_buys_at_price[sub_p] - our_buy_fills_vs_explicit[sub_p]
                     if excess_needed_from_bots > 0:
-                        # This excess must have been filled by BOT SELL orders at or below our buy price (sub_p)
-                        # We record the maximum *volume* the bots sold at exactly *our* price (sub_p)
+                        if is_debug_product: print(f"    Found excess OUR BUY @{sub_p}: {excess_needed_from_bots} units -> Implies BOT SELL")
                         log_excess_bot_sells[timestamp][product][sub_p] = excess_needed_from_bots
 
             # Simulate OUR SELLS against the explicit BUY side
             if sub_sells_at_price:
-                explicit_buys_copy = copy.deepcopy(initial_explicit_book.buy_orders) # Operate on a copy
+                explicit_buys_copy = copy.deepcopy(initial_explicit_book.buy_orders)
                 our_sell_fills_vs_explicit = Counter()
-                 # Iterate through our sell prices (descending)
+                if is_debug_product: print("  Simulating OUR SELLS vs Explicit Buys...")
                 for sub_p in sorted(sub_sells_at_price.keys(), reverse=True):
-                    our_sell_vol_at_p = sub_sells_at_price[sub_p]
-                    vol_remaining_to_fill = our_sell_vol_at_p
-                     # Iterate through available explicit buy prices (descending)
-                    for book_p in sorted(explicit_buys_copy.keys(), reverse=True):
-                        if vol_remaining_to_fill <= 0: break
-                        if book_p < sub_p: continue # Explicit bid is lower than our sell price, no match
-
-                        book_v = abs(explicit_buys_copy[book_p])
-                        filled_on_explicit = min(vol_remaining_to_fill, book_v)
-
-                        if filled_on_explicit > 0:
-                            our_sell_fills_vs_explicit[sub_p] += filled_on_explicit
-                            explicit_buys_copy[book_p] -= filled_on_explicit # Consume volume
-                            vol_remaining_to_fill -= filled_on_explicit
-                            if explicit_buys_copy[book_p] == 0:
-                                del explicit_buys_copy[book_p]
-
-                    # Calculate excess: Our total sell volume at this price MINUS what the explicit book filled
-                    excess_needed_from_bots = our_sell_vol_at_p - our_sell_fills_vs_explicit[sub_p]
+                     # ... (matching logic vs explicit_buys_copy) ...
+                     # Calculate excess: Our total sell volume at this price MINUS what the explicit book filled
+                    excess_needed_from_bots = sub_sells_at_price[sub_p] - our_sell_fills_vs_explicit[sub_p]
                     if excess_needed_from_bots > 0:
-                        # This excess must have been filled by BOT BUY orders at or above our sell price (sub_p)
-                         # We record the maximum *volume* the bots bought at exactly *our* price (sub_p)
+                        if is_debug_product: print(f"    Found excess OUR SELL @{sub_p}: {excess_needed_from_bots} units -> Implies BOT BUY")
                         log_excess_bot_buys[timestamp][product][sub_p] = excess_needed_from_bots
 
+            if is_debug_product: print("--- END DEBUG EXCESS ---")
+
         return log_excess_bot_buys, log_excess_bot_sells
-
-
     def _precompute_explicit_order_depths(self, market_df: pd.DataFrame):
         """Builds a cache of OrderDepth objects from the market data feed (L1-3)."""
         print("Precomputing explicit order depths from primary market data...")
@@ -479,6 +669,7 @@ class Backtester:
         print(f"\n--- ENTERING Backtester.run (Mode: {run_mode}) ---")
         print(f"Explicit Override Provided: {explicit_book_override is not None}")
         print(f"Inferred Override Provided: {inferred_book_override is not None}")
+        self.combined_books_history = []
 
 
         traderData = "" # Initialize traderData for the run
@@ -587,7 +778,29 @@ class Backtester:
 
         # --- Main Simulation Loop ---
         for i, timestamp in enumerate(timestamps_to_iterate):
+            # --- Store Combined Book for this Timestamp ---
+            combined_books_at_t = {}
+            explicit_at_t = active_explicit_book_cache.get(timestamp, {})
+            inferred_at_t = active_inferred_cache.get(timestamp, {}) if use_inferred_book else {}
+            all_prods_at_t = set(explicit_at_t.keys()) | set(inferred_at_t.keys())
 
+            for product in all_prods_at_t:
+                if product not in self.products: continue # Only process known products
+
+                explicit_depth = explicit_at_t.get(product, OrderDepth())
+                inferred_depth = inferred_at_t.get(product, OrderDepth())
+                combined_depth = self._combine_order_books(explicit_depth, inferred_depth)
+
+                # Store if not empty
+                if combined_depth.buy_orders or combined_depth.sell_orders:
+                     combined_books_at_t[product] = combined_depth
+
+            if combined_books_at_t: # Only store if there was data for any product
+                self.combined_books_history.append({
+                    'timestamp': timestamp,
+                    'books': combined_books_at_t # Dict[product, OrderDepth]
+                })
+            # --- End Store Combined Book ---
             # --- Get Market Trades for this interval ---
             current_step_market_trades_dict = defaultdict(list)
             start_range, end_range = self.last_processed_timestamp + 1, timestamp
@@ -728,24 +941,24 @@ class Backtester:
                     # product_orders.sort(key=lambda o: o.price, reverse=(o.quantity < 0)) # Example sort
 
                     for order in product_orders:
-                          order_copy = copy.deepcopy(order)
+                        order_copy = copy.deepcopy(order)
 
-                          # 1. Match Explicit Book (Original or Override)
-                          trades_explicit, sandbox_log_output = self._match_against_book(
-                              timestamp, order_copy, explicit_depths_for_matching, sandbox_log_output,
-                              "ExplicitBook", "any"
-                          )
-                          executed_own_trades_this_step[product].extend(trades_explicit)
+                        # 1. Match Explicit Book (Original or Override)
+                        trades_explicit, sandbox_log_output = self._match_against_book(
+                            timestamp, order_copy, explicit_depths_for_matching, sandbox_log_output,
+                            "ExplicitBook", "any"
+                        )
+                        executed_own_trades_this_step[product].extend(trades_explicit)
 
-                          # 2. Match Inferred Book (Original or Override, if enabled)
-                          if use_inferred_book and abs(order_copy.quantity) > 0 and product in inferred_depths_for_matching:
-                               # Pass only the specific product's inferred book for matching
-                               current_prod_inferred = {product: inferred_depths_for_matching[product]}
-                               trades_bot, sandbox_log_output = self._match_against_book(
-                                   timestamp, order_copy, current_prod_inferred, sandbox_log_output,
-                                   "InferredBot", self.bot_behavior # Use configured bot matching rule
-                               )
-                               executed_own_trades_this_step[product].extend(trades_bot)
+                        # 2. Match Inferred Book (Original or Override, if enabled)
+                        if use_inferred_book and abs(order_copy.quantity) > 0 and product in inferred_depths_for_matching:
+                            # Pass only the specific product's inferred book for matching
+                            current_prod_inferred = {product: inferred_depths_for_matching[product]}
+                            trades_bot, sandbox_log_output = self._match_against_book(
+                                timestamp, order_copy, current_prod_inferred, sandbox_log_output,
+                                "InferredBot", self.bot_behavior # Use configured bot matching rule
+                            )
+                            executed_own_trades_this_step[product].extend(trades_bot)
 
 
             # --- Log Results for the Step ---

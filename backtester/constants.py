@@ -22,7 +22,10 @@ except ImportError:
 # --- Simulation Parameters ---
 
 MAX_TIMESTAMP = 199900  # Default maximum timestamp for a standard round (adjust if needed)
-
+# --- Data Loading Parameters ---
+TIMESTAMPS_PER_DAY = 1_000_000 # Standard duration for a trading day in competition timestamps
+CSV_FILENAME_FORMAT = "prices_round_{round_num}_day_{day_num}.csv" # Customizable format
+# --- End Data Loading ---
 
 # --- Fair Market Value Calculation Functions ---
 
@@ -33,8 +36,8 @@ def mid_price(order_depth: OrderDepth) -> float:
         # Return NaN if the OrderDepth object is None or sides are empty
         return np.nan
     try:
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = min(order_depth.buy_orders.keys())
+        best_ask = max(order_depth.sell_orders.keys())
         return float(best_bid + best_ask) / 2.0
     except Exception:
         # Handles potential errors like empty keys after filtering etc.
@@ -57,26 +60,7 @@ def mid_price(order_depth: OrderDepth) -> float:
 # The callable should accept an OrderDepth object and return a float.
 # PnL calculations will use the function assigned here.
 FAIR_MKT_VALUE: Dict[str, Callable[[OrderDepth], float]] = {
-    # Round 1
-    "PEARLS": mid_price,
-    "BANANAS": mid_price,
-    # Round 2
-    "COCONUTS": mid_price,
-    "PINA_COLADAS": mid_price,
-    # Round 3
-    "DIVING_GEAR": mid_price,
-    "BERRIES": mid_price,
-    # Round 4
-    "DIP": mid_price,
-    "UKULELE": mid_price,
-    "PICNIC_BASKET": mid_price,
-    # Round 5
-     "ROSES": mid_price,
-     "GIFT_BASKET": mid_price,
-     "CHOCOLATE": mid_price,
-     "STRAWBERRIES": mid_price,
-     # Round 6 (Based on log data)
-     "ORCHIDS": mid_price, # Replace with calculate_fair_orchids if defined
+    "SQUID_INK": mid_price,
      "KELP": mid_price,
      "RAINFOREST_RESIN": lambda _: 10000, # Special case: Fixed value (Verify if correct)
      # Add any other known *traded* products here
@@ -92,29 +76,5 @@ FAIR_MKT_VALUE: Dict[str, Callable[[OrderDepth], float]] = {
 # !! IMPORTANT: These values are EXAMPLES based on previous rounds or guesses. !!
 # !! YOU MUST UPDATE these limits based on the official competition rules !!
 # !! for the specific round you are trading.                        !!
-POSITION_LIMITS: Dict[str, int] = {
-    # # Round 1
-    # "PEARLS": 20,
-    # "BANANAS": 20,
-    # # Round 2
-    # "COCONUTS": 600,
-    # "PINA_COLADAS": 300,
-    # # Round 3
-    # "DIVING_GEAR": 50,
-    # "BERRIES": 250,
-    # # Round 4
-    # "DIP": 300, # Check R4 rules
-    # "UKULELE": 70, # Check R4 rules
-    # "PICNIC_BASKET": 70, # Check R4 rules
-    # # Round 5
-    #  "ROSES": 60,
-    #  "GIFT_BASKET": 60,
-    #  "CHOCOLATE": 250,
-    #  "STRAWBERRIES": 350,
-    #  # Round 6 (Based on log data - VERIFY THESE)
-    #  "ORCHIDS": 100,
-     "KELP": 50, # Example limit, VERIFY
-     "RAINFOREST_RESIN": 50, # Example limit, VERIFY
-     "SQUID INK": 50
-     # Add any other known traded products here with their CORRECT limits
-}
+POSITION_LIMITS: Dict[str, int] = {'KELP': 50, 'RAINFOREST_RESIN': 50, 'SQUID_INK': 50, 'CROISSANTS': 250,
+                             "JAMS": 350, "DJEMBES": 60, "PICNIC_BASKET1": 60, "PICNIC_BASKET2": 100}
